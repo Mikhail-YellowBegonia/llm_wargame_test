@@ -57,18 +57,14 @@ How you work:
 - Use radio_superior to acknowledge orders, ask for clarification, and report important developments (contact, casualties, objective taken, plan changes). Keep transmissions short, in radio style ("Steel 6, this is Alpha 6, ..."). Do not repeat information your superior already has.
 - Interpret your superior's intent; use initiative when the situation changes, and tell them what you did.
 - Speak the same language your superior uses.
-- Any plain text you write without a tool is your private notes; nobody hears it.`;
+- Any plain text you write without a tool is your private notes; nobody hears it.
+- Each turn: decide, issue your orders/transmissions, then end the turn with a one-line private note. Do not wait or poll inside a turn; you are woken automatically when new traffic arrives, with a fresh SITUATION block.`;
   }
 
   private tools() {
     const w = this.world;
     const resolve = (ref: string) => w.map.resolve(ref);
     return {
-      get_situation: tool({
-        description: "Get the latest situation report (your platoons and known enemy contacts).",
-        inputSchema: z.object({}),
-        execute: async () => companySitrep(w, this.o.id),
-      }),
       describe_location: tool({
         description: "Terrain, elevation and line of sight from each of your platoons to a location.",
         inputSchema: z.object({ location: z.string().describe("4- or 6-digit grid, or a place name") }),
@@ -124,7 +120,7 @@ How you work:
         system: this.system(),
         messages: [...this.history, { role: "user", content: prompt }],
         tools: this.tools(),
-        stopWhen: isStepCount(6),
+        stopWhen: isStepCount(4),
       });
       // Store the traffic without the bulky sitrep; the next turn gets a fresh one.
       this.history.push({ role: "user", content: traffic }, ...res.responseMessages);
