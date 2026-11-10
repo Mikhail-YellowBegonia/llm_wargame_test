@@ -3,7 +3,7 @@ import { generateText, isStepCount, tool, type LanguageModel, type ModelMessage 
 import { z } from "zod";
 import { RadioNet } from "../comms/radio";
 import { clock, companySitrep, describeLocation, placesBrief } from "../perception/sitrep";
-import { OrderKind, Roe, STATS, World } from "../sim/world";
+import { Order, OrderKind, Roe, STATS, World } from "../sim/world";
 
 export interface CommanderOpts {
   id: string;                 // own callsign
@@ -14,6 +14,9 @@ export interface CommanderOpts {
   downNet: RadioNet;          // net to subordinates
   log: (entry: object) => void;
 }
+
+/** Structured payload attached to order transmissions (lets the player's map plot intercepted orders). */
+export interface OrderPayload { unit: string; order: Order }
 
 const HEARTBEAT = 180; // game seconds without traffic before a routine self-check (only while in contact)
 const MAX_HISTORY = 40;
@@ -28,6 +31,8 @@ export class Commander {
 
   receive(from: string, text: string) { this.inbox.push(`[${clock(this.world.t)}] ${from}: ${text}`); }
   get thinking() { return this.busy; }
+  /** Full LLM context for the debug view. */
+  context() { return { system: this.system(), history: this.history, inbox: this.inbox }; }
 
   /** Called every tick; starts an LLM turn if there is something to react to. */
   tick() {
@@ -54,7 +59,8 @@ ${placesBrief(this.world)}
 How you work:
 - You only know what your platoons report. The SITUATION block is your current picture; contacts can be stale.
 - Act with tools. Orders travel over the company radio net and take some seconds to arrive.
-- Use radio_superior to acknowledge orders, ask for clarification, and report important developments (contact, casualties, objective taken, plan changes). Keep transmissions short, in radio style ("Steel 6, this is Alpha 6, ..."). Do not repeat information your superior already has.
+- Use radio_superior to acknowledge orders, ask for clarification, and report important developments (contact, casualties, objective taken, plan changes). Keep transmissions short, in radio style ("Steel 6, this is Alpha 6, ...").
+- Data link: every time you and your superior exchange a transmission, their map is automatically updated with your platoons' status, the enemy contacts you know, and the orders you issued. So do NOT recite grids, positions or unit lists; give your assessment, intent, problems and requests instead.
 - Interpret your superior's intent; use initiative when the situation changes, and tell them what you did.
 - Speak the same language your superior uses.
 - Any plain text you write without a tool is your private notes; nobody hears it.
@@ -94,7 +100,7 @@ How you work:
           const eta = this.o.downNet.send(w.t, this.o.id, u.id, text, () => {
             const r = w.command(u, order, roe as Roe | undefined);
             if (r !== "ok") this.receive(u.id, `cannot comply: ${r}`);
-          });
+          }, { unit: u.id, order } satisfies OrderPayload);
           return `Order transmitted, ${u.id} receives it in ~${eta}s.`;
         },
       }),
@@ -127,7 +133,10 @@ How you work:
       this.trimHistory();
       this.o.log({
         t: this.world.t, agent: this.o.id, prompt,
-        steps: res.steps.map((s) => ({ text: s.text, calls: s.toolCalls.map((c) => ({ tool: c.toolName, input: c.input })) })),
+        steps: res.steps.map((s) => ({
+          text: s.text,
+          calls: s.toolCalls.map((c) => ({ tool: c.toolName, input: c.input, output: s.toolResults.find((r) => r.toolCallId === c.toolCallId)?.output })),
+        })),
         usage: res.totalUsage,
       });
     } catch (err) {

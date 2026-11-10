@@ -4,7 +4,7 @@ import { createNoise2D } from "simplex-noise";
 
 export type Terrain = "open" | "forest" | "town" | "road";
 export interface Vec { x: number; y: number }
-export interface Place { name: string; pos: Vec; kind: "town" | "hill" | "wood" | "bridge" | "crossroads"; note?: string }
+export interface Place { name: string; pos: Vec; kind: "town" | "hill" | "wood" | "bridge" | "crossroads" | "marker"; note?: string }
 
 export const CELL = 50; // meters per cell
 

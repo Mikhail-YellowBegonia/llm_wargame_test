@@ -5,7 +5,9 @@
   "scripts": {
     "play": "tsx src/cli.ts",
     "headless": "tsx scripts/headless.ts",
-    "typecheck": "tsc"
+    "typecheck": "tsc",
+    "dev": "vite",
+    "build": "vite build"
   },
   "keywords": [],
   "author": "",
@@ -14,12 +16,21 @@
   "dependencies": {
     "@ai-sdk/deepseek": "^3.0.81",
     "ai": "^7.0.166",
+    "d3-contour": "^4.0.3",
+    "milsymbol": "^3.0.5",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "simplex-noise": "^4.0.3",
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@types/d3-contour": "^3.0.6",
     "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
     "tsx": "^4.23.15",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vite": "^8.3.7"
   }
 }

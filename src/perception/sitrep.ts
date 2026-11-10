@@ -15,6 +15,7 @@ const stateWord: Record<Unit["state"], string> = {
 
 export function placesBrief(world: World) {
   return world.map.places
+    .filter((p) => p.kind !== "marker")
     .map((p) => `- ${p.name} (grid ${world.map.toGrid(p.pos)}, elev ${Math.round(world.map.heightAt(p.pos))}m): ${p.note ?? p.kind}`)
     .join("\n");
 }
@@ -45,6 +46,11 @@ export function companySitrep(world: World, commander: string) {
     const nearest = own.filter((u) => u.state !== "destroyed").sort((a, b) => dist(a.pos, c.pos) - dist(b.pos, c.pos))[0];
     const rel = nearest ? `, ${Math.round(dist(nearest.pos, c.pos) / 50) * 50}m ${bearingName(nearest.pos, c.pos)} of ${nearest.id}` : "";
     lines.push(`- ${STATS[c.type].label} at ${world.map.describe(c.pos)}${rel}; ${age < 20 ? "in sight now" : `last seen ${Math.round(age / 60)} min ago`} (by ${c.seenBy})`);
+  }
+  const markers = world.map.places.filter((p) => p.kind === "marker");
+  if (markers.length) {
+    lines.push("Map markers placed by your superior (usable as destinations by name):");
+    for (const m of markers) lines.push(`- ${m.name}: grid ${world.map.toGrid(m.pos, 6)}${m.note ? ` "${m.note}"` : ""}`);
   }
   return lines.join("\n");
 }
