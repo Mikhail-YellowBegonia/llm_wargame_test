@@ -33,7 +33,18 @@ Only **three** permanent documentation files exist in this repository:
 
 - **Temporary Documents**: Never commit scratch notes, one-off plans, or investigation dumps to git. Put temporary files in `scratch/` (gitignored) or directly in GitHub Issue comments.
 
-## 3. Issue Template & Label Taxonomy
+## 3. Four-Stage Development Roadmap (`stage:*`)
+
+All work is organized into four sequential/parallel stages so agents understand the intent and constraints of each Issue:
+
+| Stage Label | Branch / Scope | Goal & Focus | What to Avoid |
+| :--- | :--- | :--- | :--- |
+| **`stage:1-stabilize`** | `main` | Fix obvious LLM scheduling quirks (debounce, step limits, in-flight order visibility) and basic platoon mechanics (standoff halt on attack) so the current baseline is stable and doesn't get in the way. | Do not redesign the agent architecture or add major new RTS mechanics here. |
+| **`stage:2-rts-core`** | `feat/rts-core` (or `main` via atomic PRs) | Develop the pure RTS simulation core (`src/sim/`), decoupled from the LLM. Modeled on **Eugen Systems** tactical wargames (*Wargame / WARNO / Regiments*): stealth/recon spotting, terrain cover & road mobility, range tiers, 4-tier morale/suppression, and indirect fire (HE + smoke). Focus on **mechanics** over content. | Do not couple simulation mechanics to LLM prompts; everything must be testable via `npm run headless`. |
+| **`stage:3-agent-v2`** | `feat/agent-v2` (research in parallel with Stage 2; code after Stage 2 stabilizes) | Survey how researchers/builders connect LLMs to RTS games (`docs/ai-survey.md`), finalize a concrete C2 & spatial-tool design once Stage 2 mechanics are locked, and implement the upgraded LLM commander. | Do not prematurely code complex agent tools while Stage 2 RTS mechanics are still shifting. |
+| **`stage:4-polish`** | Post-merge of Stage 2 & 3 | Merge RTS core and Agent v2 branches; refine scenarios/content, visual art, UI/UX, bug fixes, and code cleanup. | No speculative plans beyond Stage 4. |
+
+## 4. Issue Template & Label Taxonomy
 
 ### Labels
 - **Module (`area:*`)**: `area:sim`, `area:agent`, `area:ui`, `area:docs`

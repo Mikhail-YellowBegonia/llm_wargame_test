@@ -3,17 +3,22 @@
 Experimental tactical RTS where you command through an LLM chain of command.
 You (Steel 6) radio an LLM company commander (Alpha 6), who radios state-machine platoons.
 
-## M0: terminal prototype
+## Quick Start
 
 ```bash
 npm install
 cp .env.example .env      # put your DEEPSEEK_API_KEY in it
-npm run play              # play by radio in the terminal
-npm run headless          # no LLM: all platoons rush Kessel (combat tuning)
+npm run dev               # play on the browser staff map (http://localhost:5173)
+npm run play              # or play by radio in the terminal
+npm run headless          # no LLM: deterministic combat runner
 npm run typecheck
 ```
 
-Agent turns are logged to `logs/session-*.jsonl` (prompt, tool calls, token usage).
+## Documentation & Roadmap
+
+- [`AGENTS.md`](AGENTS.md) — Contributor & coding-agent rules, **4-stage development roadmap (`stage:1` to `stage:4`)**, and GitHub Issue contract.
+- [`docs/architecture.md`](docs/architecture.md) — As-built architecture, module boundaries, and player information model.
+- [`docs/ai-survey.md`](docs/ai-survey.md) — Literature survey & Stage 3 design principles for LLM tactical command.
 
 ## Layout
 
