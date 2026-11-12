@@ -198,6 +198,12 @@ export class World {
       u.state = u.order.dest ? "moving" : "holding";
       this.emit("recovered", u, "no longer pinned, resuming orders");
     }
+    if ((u.state === "moving" || u.state === "holding") && u.order.dest) {
+      const standoff =
+        u.order.kind === "attack" &&
+        this.alive().some((e) => e.side !== u.side && dist(u.pos, e.pos) <= STATS[u.type].range * 0.75 && this.canSee(u, e));
+      u.state = standoff ? "holding" : "moving";
+    }
     if ((u.state === "moving" || u.state === "broken") && u.order.dest) this.move(u, u.order.dest);
   }
   private move(u: Unit, dest: Vec) {
