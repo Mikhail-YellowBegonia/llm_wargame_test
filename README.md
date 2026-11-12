@@ -5,6 +5,9 @@ You (Steel 6) radio an LLM company commander (Alpha 6), who radios state-machine
 
 ## Quick Start
 
+- **Web Demo (GitHub Pages)**: <https://mikhail-yellowbegonia.github.io/llm_wargame_test/> (paste your DeepSeek API key in the top bar; stored only in your browser's `localStorage`).
+- **Manual Deploy**: `gh workflow run deploy.yml --ref main` (or trigger *Deploy to GitHub Pages* in the GitHub Actions tab for any branch).
+
 ```bash
 npm install
 cp .env.example .env      # put your DEEPSEEK_API_KEY in it

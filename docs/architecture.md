@@ -35,3 +35,5 @@ Simulation World (src/sim/)
 | `src/ui/App.tsx` | Floating windows over the map: clock/speed bar, Alpha Co. status overview, Battalion Net chat, LLM Debug drawer, and browser `localStorage` DeepSeek API key input (falls back to Vite `/api/deepseek` proxy in local dev). | `react`, `@ai-sdk/deepseek`, `src/game.ts` |
 | `src/cli.ts` | Terminal prototype loop (`npm run play`). | Node `readline`, `src/game.ts` |
 | `scripts/headless.ts` | Deterministic no-LLM combat runner (`npm run headless`). | `src/sim/*` |
+| `.github/workflows/ci.yml` | Automated CI gate (`typecheck`, `build`, `headless`) on pushes and PRs to `main` and `feat/**`. | GitHub Actions |
+| `.github/workflows/deploy.yml` | Manual (`workflow_dispatch`) static build and deployment to GitHub Pages. | GitHub Actions / Pages |

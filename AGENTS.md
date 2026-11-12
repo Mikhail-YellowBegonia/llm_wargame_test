@@ -13,13 +13,14 @@ Most implementation tasks are dispatched as GitHub Issues and executed autonomou
    - Do **NOT** touch files outside the allowed list unless required to fix a direct TypeScript compile break caused by your change.
    - Do **NOT** add new npm dependencies unless the Issue explicitly asks for one.
    - Respect the **LOC budget**: keep solutions compact, direct, and free of speculative abstractions.
-3. **Verification Gate**:
-   - Before committing or closing an Issue, all three must pass:
+3. **Verification Gate & CI/CD**:
+   - Before committing or closing an Issue, all three must pass locally (and are enforced automatically on every push/PR by `.github/workflows/ci.yml`):
      ```bash
      npm run typecheck
      npm run build
      npm run headless
      ```
+   - Static web builds are published to GitHub Pages on demand via `.github/workflows/deploy.yml` (`workflow_dispatch`, e.g. `gh workflow run deploy.yml --ref main`).
 
 ## 2. Documentation Lifecycle (Anti-Bloat Policy)
 
