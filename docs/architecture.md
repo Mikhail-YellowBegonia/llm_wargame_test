@@ -32,6 +32,6 @@ Simulation World (src/sim/)
 | `src/agents/commander.ts` | `Commander`: event-driven LLM runner (4s wakeup debounce, 6-step limit, tools: `describe_location`, `order_platoon`, `radio_superior`), ephemeral sitrep injection (stripped from history after turn). | `ai`, `zod`, `src/comms/*`, `src/perception/*` |
 | `src/game.ts` | UI-agnostic coordinator wiring `World`, `RadioNet`s, `PlayerPicture`, and `Commander`. | All core modules |
 | `src/render/PaperMap.tsx` | Full-screen SVG staff map: `d3-contour` elevation lines, terrain cells, `milsymbol` NATO APP-6 symbols, plotted orders, markers, zoom/pan. | `react`, `d3-contour`, `milsymbol` |
-| `src/ui/App.tsx` | Floating windows over the map: clock/speed bar, Alpha Co. status overview, Battalion Net chat, and LLM Debug drawer. | `react`, `@ai-sdk/deepseek`, `src/game.ts` |
+| `src/ui/App.tsx` | Floating windows over the map: clock/speed bar, Alpha Co. status overview, Battalion Net chat, LLM Debug drawer, and browser `localStorage` DeepSeek API key input (falls back to Vite `/api/deepseek` proxy in local dev). | `react`, `@ai-sdk/deepseek`, `src/game.ts` |
 | `src/cli.ts` | Terminal prototype loop (`npm run play`). | Node `readline`, `src/game.ts` |
 | `scripts/headless.ts` | Deterministic no-LLM combat runner (`npm run headless`). | `src/sim/*` |

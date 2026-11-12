@@ -36,6 +36,9 @@ const btnStyle = (active = false): React.CSSProperties => ({
   cursor: "pointer",
 });
 
+const KEY_STORAGE = "wargame_deepseek_key";
+const metaEnv = (import.meta as unknown as { env: { DEV?: boolean; WARGAME_MODEL?: string } }).env;
+
 export const App: React.FC = () => {
   const [, setTick] = useState(0);
   const [speed, setSpeed] = useState(2);
@@ -44,6 +47,8 @@ export const App: React.FC = () => {
   const [showDebug, setShowDebug] = useState(false);
   const [markerMode, setMarkerMode] = useState(false);
   const [markerNote, setMarkerNote] = useState("");
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem(KEY_STORAGE) ?? "");
+  const [showKeyInput, setShowKeyInput] = useState(() => !metaEnv.DEV && !localStorage.getItem(KEY_STORAGE));
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatEntry[]>([]);
   const [agentLogs, setAgentLogs] = useState<AgentLog[]>([]);
@@ -55,11 +60,23 @@ export const App: React.FC = () => {
 
   const gameRef = useRef<Game | null>(null);
   if (!gameRef.current) {
+    const proxyBase = `${window.location.origin}/api/deepseek`;
     const provider = createDeepSeek({
-      baseURL: `${window.location.origin}/api/deepseek`,
+      baseURL: proxyBase,
       apiKey: "proxy",
+      fetch: async (url, init) => {
+        const userKey = localStorage.getItem(KEY_STORAGE)?.trim();
+        if (userKey) {
+          const directUrl = String(url).replace(proxyBase, "https://api.deepseek.com");
+          const headers = new Headers(init?.headers);
+          headers.set("Authorization", `Bearer ${userKey}`);
+          return fetch(directUrl, { ...init, headers });
+        }
+        if (metaEnv.DEV) return fetch(url, init);
+        throw new Error("No DeepSeek API key set. Click 'API Key' in the top bar to enter your key.");
+      },
     });
-    const modelId = (import.meta as unknown as { env: { WARGAME_MODEL?: string } }).env.WARGAME_MODEL || "deepseek-flash";
+    const modelId = metaEnv.WARGAME_MODEL || "deepseek-flash";
     gameRef.current = createGame(provider(modelId), {
       onPlayerRadio: (m) => {
         setMessages((prev) => [
@@ -99,10 +116,20 @@ export const App: React.FC = () => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length, game.agentThinking]);
 
+  const updateApiKey = (val: string) => {
+    setApiKey(val);
+    if (val.trim()) localStorage.setItem(KEY_STORAGE, val.trim());
+    else localStorage.removeItem(KEY_STORAGE);
+  };
+
   const sendRadio = (e: React.FormEvent) => {
     e.preventDefault();
     const text = input.trim();
     if (!text) return;
+    if (!metaEnv.DEV && !apiKey.trim()) {
+      setShowKeyInput(true);
+      return;
+    }
     const eta = game.radio(text);
     const deliverAt = world.t + eta;
     setMessages((prev) => [
@@ -222,6 +249,33 @@ export const App: React.FC = () => {
           <button style={btnStyle(paused)} onClick={() => setPaused((p) => !p)}>
             {paused ? "Resume" : "Pause (dbg)"}
           </button>
+        )}
+        <span style={{ color: "#786f60" }}>|</span>
+        <button
+          style={{
+            ...btnStyle(showKeyInput),
+            borderColor: !metaEnv.DEV && !apiKey.trim() ? "#b45309" : "#9e9381",
+          }}
+          onClick={() => setShowKeyInput((k) => !k)}
+          title="Set DeepSeek API key (saved in browser localStorage; optional in local dev)"
+        >
+          {apiKey.trim() ? "API Key ✓" : metaEnv.DEV ? "API Key (env)" : "API Key !"}
+        </button>
+        {showKeyInput && (
+          <input
+            type="password"
+            value={apiKey}
+            onChange={(e) => updateApiKey(e.target.value)}
+            placeholder="sk-... (DeepSeek API key)"
+            style={{
+              padding: "3px 7px",
+              fontSize: 12,
+              border: "1px solid #9e9381",
+              borderRadius: 4,
+              background: "#fffdf8",
+              width: 175,
+            }}
+          />
         )}
       </div>
 
