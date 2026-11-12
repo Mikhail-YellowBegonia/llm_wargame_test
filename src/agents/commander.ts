@@ -119,7 +119,12 @@ How you work:
     this.busy = true;
     this.lastRun = this.world.t;
     const traffic = "Incoming radio traffic:\n" + this.inbox.splice(0).join("\n");
-    const prompt = `${traffic}\n\n${companySitrep(this.world, this.o.id)}`;
+    const pending = new Map(
+      this.o.downNet.pending
+        .filter((m) => m.from === this.o.id)
+        .map((m) => [m.to, m.text.replace(/^.*:\s*|\.\s*Over\.$/g, "")]),
+    );
+    const prompt = `${traffic}\n\n${companySitrep(this.world, this.o.id, pending)}`;
     try {
       const res = await generateText({
         model: this.o.model,

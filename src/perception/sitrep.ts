@@ -27,14 +27,19 @@ function orderWord(world: World, u: Unit) {
 }
 
 /** Situation as known to a company commander: own platoons (by radio) + contacts reported by them. */
-export function companySitrep(world: World, commander: string) {
+export function companySitrep(world: World, commander: string, pendingOrders?: ReadonlyMap<string, string>) {
   const own = world.units.filter((u) => u.commander === commander);
   const lines = [`SITUATION at ${clock(world.t)}`, "Own platoons:"];
   for (const u of own) {
     if (u.state === "destroyed") { lines.push(`- ${u.id} (${STATS[u.type].label}): DESTROYED / no contact`); continue; }
+    const supp = u.suppression >= 15 ? `, suppressed ${Math.round(u.suppression)}%` : "";
+    const inFlight = pendingOrders?.get(u.id);
+    const transit = inFlight ? ` (order in transit: ${inFlight})` : "";
+    const tgt = u.target ? world.get(u.target) : undefined;
+    const engaging = tgt ? `, engaging ${STATS[tgt.type].label} at grid ${world.map.toGrid(tgt.pos)}` : "";
     lines.push(
-      `- ${u.id} (${STATS[u.type].label}): at ${world.map.describe(u.pos)}, ${stateWord[u.state]}, ${strengthWord(u.strength)}, ` +
-        `order: ${orderWord(world, u)}, ROE: ${u.roe}${u.target ? ", engaging" : ""}`,
+      `- ${u.id} (${STATS[u.type].label}): at ${world.map.describe(u.pos)} in ${world.map.terrainAt(u.pos)}, ${stateWord[u.state]}, ${strengthWord(u.strength)}${supp}, ` +
+        `order: ${orderWord(world, u)}${transit}, ROE: ${u.roe}${engaging}`,
     );
   }
   const ownIds = new Set(own.map((u) => u.id));
