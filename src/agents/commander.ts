@@ -19,13 +19,14 @@ export interface CommanderOpts {
 export interface OrderPayload { unit: string; order: Order }
 
 const HEARTBEAT = 180; // game seconds without traffic before a routine self-check (only while in contact)
+const DEBOUNCE = 4;    // minimum game seconds between turns to coalesce bursty radio traffic
 const MAX_HISTORY = 40;
 
 export class Commander {
   private history: ModelMessage[] = [];
   private inbox: string[] = [];
   private busy = false;
-  private lastRun = 0;
+  private lastRun = -1e9;
 
   constructor(private world: World, private o: CommanderOpts) {}
 
@@ -40,7 +41,7 @@ export class Commander {
     const inContact = [...this.world.contacts.blue.values()].some((c) => this.world.t - c.seenAt < 60);
     if (!this.inbox.length && inContact && this.world.t - this.lastRun > HEARTBEAT)
       this.inbox.push(`[${clock(this.world.t)}] (no new traffic - routine check of the situation)`);
-    if (this.inbox.length) void this.run();
+    if (this.inbox.length && this.world.t - this.lastRun >= DEBOUNCE) void this.run();
   }
 
   private subordinates() { return this.world.units.filter((u) => u.commander === this.o.id); }
@@ -131,7 +132,7 @@ How you work:
         system: this.system(),
         messages: [...this.history, { role: "user", content: prompt }],
         tools: this.tools(),
-        stopWhen: isStepCount(4),
+        stopWhen: isStepCount(6),
       });
       // Store the traffic without the bulky sitrep; the next turn gets a fresh one.
       this.history.push({ role: "user", content: traffic }, ...res.responseMessages);
