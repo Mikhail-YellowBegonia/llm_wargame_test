@@ -50,7 +50,7 @@ All work is organized into four sequential/parallel stages so agents understand 
 | **`stage:3-agent-v2`** | `feat/agent-v2` (research in parallel with Stage 2; code after Stage 2 stabilizes) | Survey how researchers/builders connect LLMs to RTS games (`docs/staging/agent-v2/` $\rightarrow$ `docs/ai-survey.md`), finalize a concrete C2 & spatial-tool design once Stage 2 mechanics are locked, and implement the upgraded LLM commander. | Do not prematurely code complex agent tools while Stage 2 RTS mechanics are still shifting. |
 | **`stage:4-polish`** | Post-merge of Stage 2 & 3 into `main` | Merge `feat/rts-core` and `feat/agent-v2`; prune `docs/staging/`; refine scenarios/content, visual art, UI/UX, bug fixes, and code cleanup. | No speculative plans beyond Stage 4. |
 
-## 4. Rules for Authoring & Managing Issues
+## 4. Rules for Authoring & Managing Issues (Anti-Pollution & Stage Isolation)
 
 We distinguish between **Stage Master Issues (Tracking Boards)** and **Implementation Sub-Issues (Executable Tasks)**:
 
@@ -58,22 +58,33 @@ We distinguish between **Stage Master Issues (Tracking Boards)** and **Implement
 - Each active stage has a single open **Master Issue** (e.g., `[Stage 2 Master] ...`, `[Stage 3 Master] ...`) labeled `type:master`.
 - **Purpose**: Indicates that the stage is currently in progress and serves as the index/log for that stage.
 - **Strict Rule**: Agents must **NEVER** attempt to "solve" or close a Master Issue directly with a monolithic PR.
-- **Progress Updates**: Whenever a sub-issue, research note, or milestone is completed under a stage, post a **brief comment (1–2 sentences + issue/commit/file link)** on the Master Issue to record progress.
+- **Progress Updates**: Whenever an approved sub-issue or milestone is completed under a stage, post a **brief comment (1–2 sentences + issue/commit/file link)** on the Master Issue to record progress.
 - **Dispatching Work**: All concrete coding or research execution must be published as separate, structured **Sub-Issues** that reference the Master Issue (`Parent: #<master-id>`).
 
-### 4.2 Authoring Implementation & Research Sub-Issues
-When proposing or creating an executable Sub-Issue (using `.github/ISSUE_TEMPLATE/implementation_task.md`), the author **must**:
+### 4.2 Hard Guardrails Against Unauthorized Issues & Doc Pollution
+1. **Explicit Human Approval Gate (No Autonomous Issue Spawning)**:
+   - Agents must **NEVER** autonomously create GitHub Issues, post Master Issue progress comments, or label any new Issue `status:ready` without **explicit user approval of the proposed issue list/design in the current session**.
+   - Even if a prompt or document suggests "you may open issues/sub-issues", always present the proposed design/issues to the user for confirmation first.
+2. **Strict Stage Isolation (No Cross-Stage Hijacking)**:
+   - Work under **Stage 3 (`stage:3-agent-v2`, #5)** must **NEVER** create or modify **Stage 2 (`stage:2-rts-core`, #4)** Issues, nor dictate changes to `src/sim/`.
+   - **Stage 3 Code Lock**: While Stage 2 (`#4`) is still in progress, Stage 3 is strictly limited to **research and staging notes** (`docs/staging/agent-v2/`). Do **NOT** open `status:ready` code-implementation issues for `src/agents/` or `src/perception/` until Stage 2 mechanics are complete and locked.
+3. **Permanent Doc Protection & Verifiable Grounding**:
+   - Working notes belong in `docs/staging/<domain>/`. Do **NOT** overwrite permanent documents (`docs/ai-survey.md`, `docs/architecture.md`, `AGENTS.md`) with unreviewed drafts or speculative architectures.
+   - All surveyed papers, benchmarks, and model APIs must be **real, publicly verifiable, and compatible with our existing stack** (`@ai-sdk/*` standard LLM tool-calling). Never introduce unverified/non-existent model APIs or speculative architectures.
+
+### 4.3 Authoring Implementation & Research Sub-Issues
+When proposing or creating an user-approved executable Sub-Issue (using `.github/ISSUE_TEMPLATE/implementation_task.md`), the author **must**:
 1. **Foresee Exact Changes**: Inspect the codebase first and list the specific files, functions, data structures, and formulas to be added or modified. Do not publish vague "figure out how to do X" implementation issues.
 2. **Define a Strict Blast Radius**: Explicitly list `Allowed files`, `Out of scope` exclusions, Target Branch (`feat/rts-core`, `feat/agent-v2`, or `main`), and a tight `LOC budget`.
-3. **Declare Dependency Locks**: Set `Parent: #<master-id>`, `Depends on: #...`, and `Blocks: #...`. If any `Depends on` issue is still open, label the new issue `status:blocked`; otherwise label it `status:ready`.
+3. **Declare Dependency Locks**: Set `Parent: #<master-id>`, `Depends on: #...`, and `Blocks: #...`. New issues default to `status:blocked` and may only be labeled `status:ready` when all dependencies are closed **and** the user has approved execution.
 4. **Specify Observable Verification**: Include deterministic commands (`npm run typecheck`, `npm run build`, `npm run headless`) and concrete behavioral checks.
 
-### 4.3 Label Taxonomy
+### 4.4 Label Taxonomy
 - **Module (`area:*`)**: `area:sim`, `area:agent`, `area:ui`, `area:docs`
 - **Stage (`stage:*`)**: `stage:1-stabilize`, `stage:2-rts-core`, `stage:3-agent-v2`, `stage:4-polish`
 - **State (`status:*`)**: `status:ready`, `status:blocked`, `type:master`
 
-### 4.4 Required Sub-Issue Sections
+### 4.5 Required Sub-Issue Sections
 Every executable Sub-Issue must contain:
 1. **Objective** — What problem is being solved and why (plus `Parent: #<master>` and `Target branch: ...`).
 2. **Expected Changes** — Exact files, functions, and logic to add/modify.

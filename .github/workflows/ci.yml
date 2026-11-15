@@ -11,10 +11,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+      - name: Governance & branch scope check
+        run: |
+          extra_docs=$(find docs -maxdepth 1 -type f ! -name 'architecture.md' ! -name 'ai-survey.md')
+          if [ -n "$extra_docs" ]; then
+            echo "Policy violation: unexpected top-level files in docs/: $extra_docs"
+            exit 1
+          fi
+          if [ "${GITHUB_REF_NAME}" = "feat/rts-core" ]; then
+            bad=$(git diff --name-only origin/main...HEAD -- src/agents/ docs/staging/agent-v2/ docs/ai-survey.md)
+            if [ -n "$bad" ]; then echo "Scope violation on feat/rts-core: $bad"; exit 1; fi
+          fi
+          if [ "${GITHUB_REF_NAME}" = "feat/agent-v2" ]; then
+            bad=$(git diff --name-only origin/main...HEAD -- src/sim/ docs/staging/rts-core/)
+            if [ -n "$bad" ]; then echo "Scope violation on feat/agent-v2: $bad"; exit 1; fi
+          fi
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build

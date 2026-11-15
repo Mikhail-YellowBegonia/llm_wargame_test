@@ -1,8 +1,8 @@
 ---
 name: Implementation / Research Sub-Issue
-about: Structured, bounded task for autonomous agent execution
+about: Structured, bounded task for autonomous agent execution (requires owner approval before status:ready)
 title: "[Stage X] "
-labels: ["status:ready"]
+labels: ["status:blocked"]
 ---
 
 ## 1. Objective
