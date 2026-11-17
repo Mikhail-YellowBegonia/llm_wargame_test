@@ -4,7 +4,7 @@ import { AgentLog, createGame, Game } from "../game";
 import { clock } from "../perception/sitrep";
 import { COMPANY, PLAYER } from "../sim/scenario";
 import { getMoraleTier, isCowering, MoraleEventKind, MoraleTier, OrderKind, Roe, STATS } from "../sim/world";
-import { LosObserver, Sandtable3D } from "../render/Sandtable3D";
+import { LosObserver, Sandtable3D, SimClockState } from "../render/Sandtable3D";
 import { Building, BuildingFloor, MobilityClass, UnitTrait, Vec } from "../sim/map";
 
 interface ChatEntry {
@@ -106,22 +106,37 @@ export const App: React.FC = () => {
   const game = gameRef.current;
   const { world, picture, battalionNet } = game;
 
-  // Main simulation loop (paused when Map Inspector is active)
+  const simClockRef = useRef<SimClockState>({ tickAlpha: 0, speed: 2, paused: false });
+  simClockRef.current.speed = speed;
+  simClockRef.current.paused = paused || inspectorMode || !!game.result;
+
+  // 60 FPS rAF accumulator driving 1 Hz simulation ticks with fractional tickAlpha for smooth interpolation
   useEffect(() => {
     let acc = 0;
-    const id = setInterval(() => {
-      if (paused || inspectorMode || game.result) return;
-      acc += 0.1 * speed;
+    let last = performance.now();
+    let raf = 0;
+    const frame = (now: number) => {
+      raf = requestAnimationFrame(frame);
+      const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
+      last = now;
+      const clk = simClockRef.current;
+      if (clk.paused || game.result) return;
+      acc += dt * clk.speed;
       let stepped = false;
       while (acc >= 1) {
         acc -= 1;
         stepped = true;
-        if (game.step()) break;
+        if (game.step()) {
+          acc = 1;
+          break;
+        }
       }
+      clk.tickAlpha = acc;
       if (stepped) setTick((t) => t + 1);
-    }, 100);
-    return () => clearInterval(id);
-  }, [game, speed, paused, inspectorMode]);
+    };
+    raf = requestAnimationFrame(frame);
+    return () => cancelAnimationFrame(raf);
+  }, [game]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -326,6 +341,7 @@ export const App: React.FC = () => {
         selectedUnitId={selectedUnitId}
         losObserver={losObserver}
         selectedBuilding={selectedBuilding}
+        simClockRef={simClockRef}
         onMapClick={handleMapClick}
         onHoverPos={setHoverPos}
         onSelectBuilding={handleSelectBuilding}

@@ -4,7 +4,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import ms from "milsymbol";
 import { Game } from "../game";
 import { Building, BuildingFloor, TERRAIN_DEFS, TERRAIN_IDS, Vec } from "../sim/map";
-import { UnitType, WeaponSignatureClass } from "../sim/world";
+import { CombatShotEvent, Unit, UnitType, WeaponSignatureClass, getMoraleTier, isCowering } from "../sim/world";
 
 const WEAPON_TAG: Record<WeaponSignatureClass, string> = {
   small_arms: "SA",
@@ -108,6 +108,12 @@ export interface LosObserver {
   label: string;
 }
 
+export interface SimClockState {
+  tickAlpha: number;
+  speed: number;
+  paused: boolean;
+}
+
 interface Props {
   game: Game;
   god: boolean;
@@ -118,6 +124,7 @@ interface Props {
   selectedUnitId: string | null;
   losObserver: LosObserver | null;
   selectedBuilding: { building: Building; floorLevel: number } | null;
+  simClockRef: React.RefObject<SimClockState>;
   onMapClick: (pos: Vec, grid4: string) => void;
   onHoverPos: (pos: Vec | null) => void;
   onSelectBuilding: (building: Building, floor: BuildingFloor) => void;
@@ -125,6 +132,349 @@ interface Props {
   onCancelOrder?: () => void;
 }
 
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+function lerpAngle(a: number, b: number, t: number): number {
+  let diff = ((b - a + Math.PI) % (Math.PI * 2)) - Math.PI;
+  if (diff < -Math.PI) diff += Math.PI * 2;
+  return a + diff * t;
+}
+
+function makeCirclePoints(radius: number, y: number, segments = 24): THREE.Vector3[] {
+  const pts: THREE.Vector3[] = [];
+  for (let i = 0; i < segments; i++) {
+    const a = (i / segments) * Math.PI * 2;
+    pts.push(new THREE.Vector3(Math.cos(a) * radius, y, -Math.sin(a) * radius));
+  }
+  return pts;
+}
+
+interface UnitRenderNode {
+  root: THREE.Group;
+  hullGroup: THREE.Group;
+  hullMats: THREE.MeshStandardMaterial[];
+  baseHex: string;
+  wreckApplied: boolean;
+  paxMeshes: THREE.Mesh[];
+  frontalArc: THREE.Group;
+  selRing: THREE.LineLoop;
+  cowerRing: THREE.LineLoop;
+  cowerMat: THREE.LineBasicMaterial;
+  tether: THREE.Line;
+  sprite: THREE.Sprite;
+  orderLine: THREE.Line;
+  smokeAcc: number;
+}
+
+function createUnitNode(u: Unit): UnitRenderNode {
+  const root = new THREE.Group();
+  const hullGroup = new THREE.Group();
+  const baseHex = u.side === "blue" ? "#2f5d8c" : "#b91c1c";
+  const accentHex = u.side === "blue" ? "#1e3a8a" : "#7f1d1d";
+  const bodyMat = new THREE.MeshStandardMaterial({ color: baseHex, roughness: 0.65, metalness: 0.15 });
+  const turretMat = new THREE.MeshStandardMaterial({ color: accentHex, roughness: 0.6, metalness: 0.2 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: "#1f2937", roughness: 0.85 });
+  const hullMats = [bodyMat, turretMat, darkMat];
+  const paxMeshes: THREE.Mesh[] = [];
+
+  if (u.type === "tank") {
+    const chassis = new THREE.Mesh(new THREE.BoxGeometry(10.5, 1.8, 5.2), bodyMat);
+    chassis.position.set(0, 1.1, 0);
+    const trackL = new THREE.Mesh(new THREE.BoxGeometry(11.0, 1.2, 1.1), darkMat);
+    trackL.position.set(0, 0.7, -2.5);
+    const trackR = new THREE.Mesh(new THREE.BoxGeometry(11.0, 1.2, 1.1), darkMat);
+    trackR.position.set(0, 0.7, 2.5);
+    const turret = new THREE.Mesh(new THREE.BoxGeometry(5.0, 1.3, 3.6), turretMat);
+    turret.position.set(0.2, 2.4, 0);
+    const barrel = new THREE.Mesh(new THREE.BoxGeometry(6.8, 0.45, 0.45), darkMat);
+    barrel.position.set(5.4, 2.5, 0);
+    hullGroup.add(chassis, trackL, trackR, turret, barrel);
+  } else if (u.type === "ifv") {
+    const chassis = new THREE.Mesh(new THREE.BoxGeometry(9.6, 2.0, 4.6), bodyMat);
+    chassis.position.set(0, 1.2, 0);
+    const trackL = new THREE.Mesh(new THREE.BoxGeometry(10.0, 1.1, 0.9), darkMat);
+    trackL.position.set(0, 0.65, -2.2);
+    const trackR = new THREE.Mesh(new THREE.BoxGeometry(10.0, 1.1, 0.9), darkMat);
+    trackR.position.set(0, 0.65, 2.2);
+    const turret = new THREE.Mesh(new THREE.BoxGeometry(3.4, 1.1, 2.8), turretMat);
+    turret.position.set(0.4, 2.5, 0);
+    const autocannon = new THREE.Mesh(new THREE.BoxGeometry(4.6, 0.3, 0.3), darkMat);
+    autocannon.position.set(4.1, 2.55, 0);
+    const pod = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.85, 1.0), turretMat);
+    pod.position.set(0.4, 2.7, 1.9);
+    hullGroup.add(chassis, trackL, trackR, turret, autocannon, pod);
+  } else {
+    const count = Math.max(4, u.headcount || 4);
+    const geo = new THREE.CylinderGeometry(0.6, 0.75, 2.5, 6);
+    for (let i = 0; i < count; i++) {
+      const m = new THREE.Mesh(geo, i === 0 ? turretMat : bodyMat);
+      const ang = (i / count) * Math.PI * 2;
+      const rad = i === 0 ? 0 : 3.8;
+      m.position.set(Math.cos(ang) * rad, 1.25, -Math.sin(ang) * rad);
+      hullGroup.add(m);
+      paxMeshes.push(m);
+    }
+    if (u.type === "atgm") {
+      const tube = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.45, 0.45), darkMat);
+      tube.position.set(1.6, 2.0, 0);
+      hullGroup.add(tube);
+    }
+  }
+
+  // Frontal armor arc (+/- 45 deg around +X) shown when selected
+  const frontalArc = new THREE.Group();
+  const arcColor = u.side === "blue" ? "#38bdf8" : "#f87171";
+  const wedgeGeo = new THREE.RingGeometry(8, 28, 16, 1, -Math.PI / 4, Math.PI / 2);
+  wedgeGeo.rotateX(-Math.PI / 2);
+  const wedge = new THREE.Mesh(
+    wedgeGeo,
+    new THREE.MeshBasicMaterial({ color: arcColor, transparent: true, opacity: 0.25, side: THREE.DoubleSide, depthWrite: false }),
+  );
+  wedge.position.y = 1.2;
+  const edgeGeo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(Math.cos(Math.PI / 4) * 28, 1.3, -Math.sin(Math.PI / 4) * 28),
+    new THREE.Vector3(0, 1.3, 0),
+    new THREE.Vector3(Math.cos(-Math.PI / 4) * 28, 1.3, -Math.sin(-Math.PI / 4) * 28),
+  ]);
+  const edges = new THREE.Line(edgeGeo, new THREE.LineBasicMaterial({ color: arcColor, transparent: true, opacity: 0.75 }));
+  frontalArc.add(wedge, edges);
+  frontalArc.visible = false;
+  hullGroup.add(frontalArc);
+  root.add(hullGroup);
+
+  const selRing = new THREE.LineLoop(
+    new THREE.BufferGeometry().setFromPoints(makeCirclePoints(19, 1.4)),
+    new THREE.LineBasicMaterial({ color: u.side === "blue" ? "#0284c7" : "#dc2626" }),
+  );
+  selRing.visible = false;
+  root.add(selRing);
+
+  const cowerMat = new THREE.LineBasicMaterial({ color: "#f59e0b" });
+  const cowerRing = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(makeCirclePoints(14, 1.2)), cowerMat);
+  cowerRing.visible = false;
+  root.add(cowerRing);
+
+  const tether = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 3, 0), new THREE.Vector3(0, 22, 0)]),
+    new THREE.LineBasicMaterial({ color: u.side === "blue" ? "#1d4ed8" : "#b91c1c", transparent: true, opacity: 0.65 }),
+  );
+  root.add(tether);
+
+  const prefix = u.side === "blue" ? u.id.replace("Alpha ", "A") : u.id.replace("Red ", "R");
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: getUnitTexture(u.side, u.type, prefix), depthTest: false }));
+  sprite.position.set(0, 26, 0);
+  sprite.scale.set(82, 82, 1);
+  sprite.userData = { unitId: u.id, side: u.side };
+  root.add(sprite);
+
+  const orderLine = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+    new THREE.LineBasicMaterial({ color: u.side === "blue" ? "#1d4ed8" : "#b91c1c" }),
+  );
+  orderLine.visible = false;
+
+  return {
+    root,
+    hullGroup,
+    hullMats,
+    baseHex,
+    wreckApplied: false,
+    paxMeshes,
+    frontalArc,
+    selRing,
+    cowerRing,
+    cowerMat,
+    tether,
+    sprite,
+    orderLine,
+    smokeAcc: 0,
+  };
+}
+
+interface ActiveProjectile {
+  mesh: THREE.Mesh;
+  from: THREE.Vector3;
+  to: THREE.Vector3;
+  elapsed: number;
+  duration: number;
+  arcHeight: number;
+  smokeTrail: boolean;
+  smokeAcc: number;
+  ev: CombatShotEvent;
+}
+
+interface ActiveBurst {
+  obj: THREE.Object3D;
+  mat: THREE.Material;
+  elapsed: number;
+  duration: number;
+  vel?: THREE.Vector3;
+  startScale: number;
+  endScale: number;
+  startOpacity: number;
+}
+
+function createVfxManager(vfxGroup: THREE.Group) {
+  const sphereGeo = new THREE.SphereGeometry(1, 8, 6);
+  const boltGeo = new THREE.BoxGeometry(1, 1, 5.5);
+  const ringGeo = new THREE.RingGeometry(0.7, 1.0, 18);
+  ringGeo.rotateX(-Math.PI / 2);
+
+  const projectiles: ActiveProjectile[] = [];
+  const bursts: ActiveBurst[] = [];
+  let lastShotId = 0;
+
+  const spawnBurst = (
+    geo: THREE.BufferGeometry,
+    color: string,
+    pos: THREE.Vector3,
+    duration: number,
+    startScale: number,
+    endScale: number,
+    startOpacity = 0.9,
+    vel?: THREE.Vector3,
+    flatRotate = false,
+  ) => {
+    if (bursts.length >= 220) {
+      const old = bursts.shift()!;
+      vfxGroup.remove(old.obj);
+      old.mat.dispose();
+    }
+    const mat = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: startOpacity,
+      depthWrite: false,
+      side: flatRotate ? THREE.DoubleSide : THREE.FrontSide,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.copy(pos);
+    mesh.scale.setScalar(startScale);
+    if (vel && !flatRotate) mesh.lookAt(pos.clone().add(vel));
+    vfxGroup.add(mesh);
+    bursts.push({ obj: mesh, mat, elapsed: 0, duration, vel, startScale, endScale, startOpacity });
+  };
+
+  const spawnShot = (ev: CombatShotEvent) => {
+    const from = new THREE.Vector3(ev.from.x, ev.fromZ, -ev.from.y);
+    const to = new THREE.Vector3(ev.to.x, ev.toZ, -ev.to.y);
+    // 1. Muzzle flash (~0.12s)
+    spawnBurst(sphereGeo, "#fde047", from, 0.14, 2.2, 5.0, 0.95);
+    spawnBurst(ringGeo, "#fb923c", from, 0.16, 1.5, 7.5, 0.8, undefined, true);
+
+    // 2. In-flight projectile
+    const d = from.distanceTo(to);
+    const isAtgm = ev.ammo === "HEAT" && ev.weaponClass === "heavy_weapon";
+    const speed = ev.ammo === "AP" ? 900 : isAtgm ? 280 : 450;
+    const duration = Math.min(isAtgm ? 1.8 : 0.7, Math.max(isAtgm ? 0.15 : 0.08, d / speed));
+    const color = ev.ammo === "AP" ? "#fef08a" : ev.ammo === "HEAT" ? "#fb923c" : "#f97316";
+    const mat = new THREE.MeshBasicMaterial({ color });
+    const mesh = new THREE.Mesh(isAtgm ? sphereGeo : boltGeo, mat);
+    mesh.position.copy(from);
+    if (isAtgm) mesh.scale.setScalar(1.6);
+    else {
+      mesh.scale.set(0.65, 0.65, 1.4);
+      mesh.lookAt(to);
+    }
+    vfxGroup.add(mesh);
+    projectiles.push({
+      mesh,
+      from,
+      to,
+      elapsed: 0,
+      duration,
+      arcHeight: ev.ammo === "HE" ? Math.min(35, d * 0.06) : isAtgm ? 4 : 0,
+      smokeTrail: isAtgm,
+      smokeAcc: 0,
+      ev,
+    });
+  };
+
+  const spawnImpact = (ev: CombatShotEvent, pos: THREE.Vector3) => {
+    if (ev.penetrated || ev.ammo === "HE") {
+      const rScale = Math.max(4, (ev.blastRadius ?? 3.5) * 2.2);
+      spawnBurst(sphereGeo, "#f97316", pos, 0.45, 2.5, rScale * 1.1, 0.95);
+      spawnBurst(ringGeo, "#ef4444", pos, 0.6, 2.0, rScale * 2.4, 0.85, undefined, true);
+      spawnBurst(sphereGeo, "#52525b", pos, 1.3, 3.0, rScale * 1.6, 0.55, new THREE.Vector3(0, 9, 0));
+    } else if (ev.hit) {
+      // Non-penetrating ricochet sparks (blue-white)
+      const back = new THREE.Vector3(ev.from.x - ev.to.x, 0, -(ev.from.y - ev.to.y)).normalize();
+      for (let i = 0; i < 3; i++) {
+        const dir = new THREE.Vector3(
+          back.x * 16 + (i - 1) * 14,
+          14 + i * 6,
+          back.z * 16 + (1 - i) * 12,
+        );
+        spawnBurst(boltGeo, "#e0f2fe", pos, 0.35, 0.5, 0.3, 0.95, dir);
+      }
+      spawnBurst(sphereGeo, "#38bdf8", pos, 0.2, 1.5, 4.0, 0.9);
+    } else {
+      // Miss dust plume
+      spawnBurst(sphereGeo, "#d6c7a9", pos, 0.65, 2.0, 6.5, 0.5, new THREE.Vector3(0, 5, 0));
+    }
+  };
+
+  const spawnWreckSmoke = (pos: THREE.Vector3) => {
+    spawnBurst(sphereGeo, "#3f3f46", pos, 1.6, 2.4, 8.5, 0.52, new THREE.Vector3(1.5, 8.5, -1.0));
+  };
+
+  const update = (dt: number, world: Game["world"], isShotVisible: (ev: CombatShotEvent) => boolean) => {
+    for (const ev of world.shotEvents) {
+      if (ev.id <= lastShotId) continue;
+      lastShotId = ev.id;
+      if (isShotVisible(ev)) spawnShot(ev);
+    }
+
+    for (let i = projectiles.length - 1; i >= 0; i--) {
+      const p = projectiles[i];
+      p.elapsed += dt;
+      const u = Math.min(1, p.elapsed / p.duration);
+      p.mesh.position.lerpVectors(p.from, p.to, u);
+      p.mesh.position.y += Math.sin(u * Math.PI) * p.arcHeight;
+      if (p.smokeTrail) {
+        p.smokeAcc += dt;
+        if (p.smokeAcc >= 0.03) {
+          p.smokeAcc = 0;
+          spawnBurst(sphereGeo, "#cbd5e1", p.mesh.position.clone(), 0.45, 1.1, 2.8, 0.55);
+        }
+      }
+      if (u >= 1) {
+        vfxGroup.remove(p.mesh);
+        (p.mesh.material as THREE.Material).dispose();
+        projectiles.splice(i, 1);
+        spawnImpact(p.ev, p.to);
+      }
+    }
+
+    for (let i = bursts.length - 1; i >= 0; i--) {
+      const b = bursts[i];
+      b.elapsed += dt;
+      const u = Math.min(1, b.elapsed / b.duration);
+      if (b.vel) b.obj.position.addScaledVector(b.vel, dt);
+      b.obj.scale.setScalar(lerp(b.startScale, b.endScale, u));
+      (b.mat as THREE.MeshBasicMaterial).opacity = b.startOpacity * (1 - u);
+      if (u >= 1) {
+        vfxGroup.remove(b.obj);
+        b.mat.dispose();
+        bursts.splice(i, 1);
+      }
+    }
+  };
+
+  const dispose = () => {
+    for (const p of projectiles) { vfxGroup.remove(p.mesh); (p.mesh.material as THREE.Material).dispose(); }
+    for (const b of bursts) { vfxGroup.remove(b.obj); b.mat.dispose(); }
+    projectiles.length = 0;
+    bursts.length = 0;
+    sphereGeo.dispose();
+    boltGeo.dispose();
+    ringGeo.dispose();
+  };
+
+  return { update, spawnWreckSmoke, dispose };
+}
 interface FloorInstanceMeta {
   building: Building;
   floor: BuildingFloor;
@@ -169,6 +519,7 @@ export const Sandtable3D: React.FC<Props> = (props) => {
     floorMeta: FloorInstanceMeta[];
     losGroup: THREE.Group;
     dynGroup: THREE.Group;
+    unitNodes: Map<string, UnitRenderNode>;
     hoveredIdx: number;
   } | null>(null);
 
@@ -393,10 +744,19 @@ export const Sandtable3D: React.FC<Props> = (props) => {
 
     const losGroup = new THREE.Group();
     const dynGroup = new THREE.Group();
+    const unitGroup = new THREE.Group();
+    const orderGroup = new THREE.Group();
+    const contactGroup = new THREE.Group();
+    const vfxGroup = new THREE.Group();
+    dynGroup.add(unitGroup, orderGroup, contactGroup, vfxGroup);
     scene.add(losGroup);
     scene.add(dynGroup);
 
-    sceneRef.current = { scene, camera, controls, terrainMesh, buildingMesh, floorMeta, losGroup, dynGroup, hoveredIdx: -1 };
+    const unitNodes = new Map<string, UnitRenderNode>();
+    const contactNodes = new Map<string, { sprite: THREE.Sprite; key: string }>();
+    const vfx = createVfxManager(vfxGroup);
+
+    sceneRef.current = { scene, camera, controls, terrainMesh, buildingMesh, floorMeta, losGroup, dynGroup, unitNodes, hoveredIdx: -1 };
 
     // Raycasting pointer handlers
     const raycaster = new THREE.Raycaster();
@@ -408,9 +768,12 @@ export const Sandtable3D: React.FC<Props> = (props) => {
       ndc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(ndc, camera);
-      const selectableSprites = dynGroup.children.filter(
-        (c): c is THREE.Sprite => c instanceof THREE.Sprite && typeof c.userData?.unitId === "string",
-      );
+      const selectableSprites: THREE.Sprite[] = [];
+      for (const n of unitNodes.values()) {
+        if (n.root.visible && n.sprite.visible && typeof n.sprite.userData?.unitId === "string") {
+          selectableSprites.push(n.sprite);
+        }
+      }
       if (selectableSprites.length > 0 && !propsRef.current.orderTargetMode) {
         const sHits = raycaster.intersectObjects(selectableSprites, false);
         if (sHits.length > 0) {
@@ -491,11 +854,146 @@ export const Sandtable3D: React.FC<Props> = (props) => {
     };
     window.addEventListener("resize", onResize);
 
-    // Animation loop + projected landmark labels
+    // 60 FPS continuous render loop: entity interpolation, 3D hulls, VFX & landmark labels
     let raf = 0;
+    let lastFrameMs = performance.now();
     const projVec = new THREE.Vector3();
+    const syncScene60Fps = (dt: number) => {
+      const cur = propsRef.current;
+      const { world, picture } = cur.game;
+      const liveBlue = cur.god || !cur.game.aiCommanderEnabled;
+      const alpha = cur.simClockRef.current.paused ? cur.simClockRef.current.tickAlpha : Math.min(1, Math.max(0, cur.simClockRef.current.tickAlpha));
+
+      const trackMap = new Map(picture.tracks.map((t) => [t.id, t.pos]));
+      const orderMap = new Map(picture.orders.filter((o) => o.order.dest).map((o) => [o.unit, o.order.dest!]));
+
+      for (const u of world.units) {
+        let node = unitNodes.get(u.id);
+        if (!node) {
+          node = createUnitNode(u);
+          unitNodes.set(u.id, node);
+          unitGroup.add(node.root);
+          orderGroup.add(node.orderLine);
+        }
+
+        const isBlue = u.side === "blue";
+        const visibleUnit = isBlue || cur.god || (u.state === "destroyed" && world.contacts.blue.has(u.id));
+        if (!visibleUnit || u.embarkedIn) {
+          node.root.visible = false;
+          node.orderLine.visible = false;
+          continue;
+        }
+        node.root.visible = true;
+
+        const interpPos =
+          isBlue && !liveBlue
+            ? (trackMap.get(u.id) ?? u.pos)
+            : { x: lerp(u.prevPos.x, u.pos.x, alpha), y: lerp(u.prevPos.y, u.pos.y, alpha) };
+        const interpHeading = isBlue && !liveBlue ? u.heading : lerpAngle(u.prevHeading, u.heading, alpha);
+        const floorOff = u.garrison ? Math.max(0, world.unitEyeHeight(u) - 1.5) : 0;
+        const elev = map.elevationAt(interpPos) + floorOff;
+
+        node.root.position.set(interpPos.x, elev, -interpPos.y);
+        node.hullGroup.rotation.y = interpHeading;
+
+        if (node.paxMeshes.length > 0) {
+          node.paxMeshes.forEach((m, idx) => { m.visible = u.state === "destroyed" ? idx < 2 : idx < u.headcount; });
+        }
+
+        if (u.state === "destroyed") {
+          if (!node.wreckApplied) {
+            node.wreckApplied = true;
+            node.hullMats.forEach((m) => m.color.set("#27272a"));
+          }
+          node.sprite.visible = false;
+          node.tether.visible = false;
+          node.selRing.visible = false;
+          node.frontalArc.visible = false;
+          node.cowerRing.visible = false;
+          node.orderLine.visible = false;
+          node.smokeAcc += dt;
+          if (node.smokeAcc >= 0.45) {
+            node.smokeAcc = 0;
+            vfx.spawnWreckSmoke(new THREE.Vector3(interpPos.x, elev + 2.5, -interpPos.y));
+          }
+          continue;
+        }
+
+        if (node.wreckApplied) {
+          node.wreckApplied = false;
+          node.hullMats[0].color.set(node.baseHex);
+        }
+
+        node.sprite.visible = true;
+        node.tether.visible = true;
+        const isSel = cur.selectedUnitId === u.id;
+        node.selRing.visible = isSel;
+        node.frontalArc.visible = isSel;
+
+        const cower = isCowering(u);
+        node.cowerRing.visible = cower;
+        if (cower) {
+          node.cowerMat.color.set(getMoraleTier(u.morale) === "panicked" ? "#ef4444" : "#f59e0b");
+        }
+
+        const dest = isBlue ? (liveBlue ? u.order?.dest : orderMap.get(u.id)) : cur.god ? u.order?.dest : undefined;
+        if (dest) {
+          node.orderLine.visible = true;
+          const posAttr = node.orderLine.geometry.getAttribute("position") as THREE.BufferAttribute;
+          posAttr.setXYZ(0, interpPos.x, elev + 6, -interpPos.y);
+          posAttr.setXYZ(1, dest.x, map.elevationAt(dest) + 6, -dest.y);
+          posAttr.needsUpdate = true;
+        } else {
+          node.orderLine.visible = false;
+        }
+      }
+
+      // Sync fog-of-war enemy contacts (when God mode is OFF)
+      const activeContactIds = new Set<string>();
+      if (!cur.god) {
+        const contactSource = !cur.game.aiCommanderEnabled ? [...world.contacts.blue.values()] : picture.contacts;
+        for (const c of contactSource) {
+          activeContactIds.add(c.id);
+          const texKey = c.level === "visual" && c.type ? `vis:${c.type}:${c.id}` : `con:${c.weaponClass ?? "?"}`;
+          let entry = contactNodes.get(c.id);
+          const tex =
+            c.level === "visual" && c.type
+              ? getUnitTexture("red", c.type, c.id.replace("Red ", "R"))
+              : getContactTexture(c.weaponClass ? WEAPON_TAG[c.weaponClass] : "?");
+          if (!entry) {
+            const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
+            sp.scale.set(82, 82, 1);
+            contactGroup.add(sp);
+            entry = { sprite: sp, key: texKey };
+            contactNodes.set(c.id, entry);
+          } else if (entry.key !== texKey) {
+            entry.key = texKey;
+            entry.sprite.material.map = tex;
+            entry.sprite.material.needsUpdate = true;
+          }
+          entry.sprite.visible = true;
+          entry.sprite.position.set(c.pos.x, map.elevationAt(c.pos) + 26, -c.pos.y);
+        }
+      }
+      for (const [id, entry] of contactNodes) {
+        if (!activeContactIds.has(id)) entry.sprite.visible = false;
+      }
+
+      // Step sub-second ballistics & combat VFX
+      vfx.update(dt, world, (ev) => {
+        if (cur.god || !cur.game.aiCommanderEnabled) return true;
+        const sh = world.get(ev.shooterId);
+        const tg = ev.targetId ? world.get(ev.targetId) : undefined;
+        return sh?.side === "blue" || tg?.side === "blue" || world.contacts.blue.has(ev.shooterId) || (!!ev.targetId && world.contacts.blue.has(ev.targetId));
+      });
+    };
+
     const animate = () => {
       raf = requestAnimationFrame(animate);
+      const now = performance.now();
+      const dt = Math.min(0.08, Math.max(0.001, (now - lastFrameMs) / 1000));
+      lastFrameMs = now;
+      syncScene60Fps(dt);
       controls.update();
       renderer.render(scene, camera);
 
@@ -517,6 +1015,22 @@ export const Sandtable3D: React.FC<Props> = (props) => {
 
     return () => {
       cancelAnimationFrame(raf);
+      vfx.dispose();
+      for (const n of unitNodes.values()) {
+        n.root.traverse((obj) => {
+          if (obj instanceof THREE.Mesh || obj instanceof THREE.Line) {
+            obj.geometry.dispose();
+            (obj.material as THREE.Material).dispose();
+          } else if (obj instanceof THREE.Sprite) {
+            obj.material.dispose();
+          }
+        });
+        n.orderLine.geometry.dispose();
+        (n.orderLine.material as THREE.Material).dispose();
+      }
+      unitNodes.clear();
+      for (const c of contactNodes.values()) c.sprite.material.dispose();
+      contactNodes.clear();
       window.removeEventListener("resize", onResize);
       renderer.domElement.removeEventListener("pointerdown", onDown);
       renderer.domElement.removeEventListener("pointermove", onMove);
@@ -616,96 +1130,6 @@ export const Sandtable3D: React.FC<Props> = (props) => {
     fanMesh.renderOrder = 2;
     losGroup.add(fanMesh);
   }, [losObserver, map]);
-
-  // Sync unit NATO sprites & plotted order vectors
-  useEffect(() => {
-    const ctx = sceneRef.current;
-    if (!ctx) return;
-    const { dynGroup } = ctx;
-    while (dynGroup.children.length > 0) {
-      const child = dynGroup.children.pop()!;
-      if (child instanceof THREE.Line) {
-        child.geometry.dispose();
-        (child.material as THREE.Material).dispose();
-      } else if (child instanceof THREE.Sprite) {
-        child.material.dispose();
-      }
-    }
-
-    const { world, picture } = game;
-    const liveBlue = god || !game.aiCommanderEnabled;
-    const bluePos = new Map<string, Vec>();
-    if (liveBlue) {
-      for (const u of world.units) if (u.side === "blue" && u.state !== "destroyed") bluePos.set(u.id, u.pos);
-    } else {
-      for (const t of picture.tracks) bluePos.set(t.id, t.pos);
-    }
-
-    const addSelectionRing = (pos: Vec, color: string) => {
-      const pts: THREE.Vector3[] = [];
-      const elev = map.elevationAt(pos) + 3;
-      for (let i = 0; i < 24; i++) {
-        const a = (i / 24) * Math.PI * 2;
-        pts.push(new THREE.Vector3(pos.x + Math.cos(a) * 38, elev, -(pos.y + Math.sin(a) * 38)));
-      }
-      dynGroup.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color })));
-    };
-
-    for (const u of world.units) {
-      if (u.side !== "blue" || u.state === "destroyed") continue;
-      const pos = bluePos.get(u.id) ?? u.pos;
-      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: getUnitTexture("blue", u.type, u.id.replace("Alpha ", "A")), depthTest: false }));
-      sp.position.set(pos.x, map.elevationAt(pos) + 26, -pos.y);
-      sp.scale.set(90, 90, 1);
-      sp.userData = { unitId: u.id, side: "blue" };
-      dynGroup.add(sp);
-      if (selectedUnitId === u.id) addSelectionRing(pos, "#0284c7");
-    }
-
-    const orders = liveBlue
-      ? world.units.filter((u) => u.side === "blue" && u.state !== "destroyed" && u.order?.dest).map((u) => ({ unit: u.id, dest: u.order!.dest! }))
-      : picture.orders.filter((o) => o.order.dest).map((o) => ({ unit: o.unit, dest: o.order.dest! }));
-    for (const o of orders) {
-      const from = bluePos.get(o.unit);
-      if (!from) continue;
-      const g = new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(from.x, map.elevationAt(from) + 10, -from.y),
-        new THREE.Vector3(o.dest.x, map.elevationAt(o.dest) + 10, -o.dest.y),
-      ]);
-      dynGroup.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color: "#1d4ed8" })));
-    }
-
-    if (god) {
-      for (const u of world.units) {
-        if (u.side !== "red" || u.state === "destroyed") continue;
-        const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: getUnitTexture("red", u.type, u.id.replace("Red ", "R")), depthTest: false }));
-        sp.position.set(u.pos.x, map.elevationAt(u.pos) + 26, -u.pos.y);
-        sp.scale.set(90, 90, 1);
-        sp.userData = { unitId: u.id, side: "red" };
-        dynGroup.add(sp);
-        if (selectedUnitId === u.id) addSelectionRing(u.pos, "#dc2626");
-        if (u.order?.dest) {
-          const g = new THREE.BufferGeometry().setFromPoints([
-            new THREE.Vector3(u.pos.x, map.elevationAt(u.pos) + 10, -u.pos.y),
-            new THREE.Vector3(u.order.dest.x, map.elevationAt(u.order.dest) + 10, -u.order.dest.y),
-          ]);
-          dynGroup.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color: "#b91c1c" })));
-        }
-      }
-    } else {
-      const contactSource = !game.aiCommanderEnabled ? [...world.contacts.blue.values()] : picture.contacts;
-      for (const c of contactSource) {
-        const tex =
-          c.level === "visual" && c.type
-            ? getUnitTexture("red", c.type, c.id.replace("Red ", "R"))
-            : getContactTexture(c.weaponClass ? WEAPON_TAG[c.weaponClass] : "?");
-        const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
-        sp.position.set(c.pos.x, map.elevationAt(c.pos) + 26, -c.pos.y);
-        sp.scale.set(90, 90, 1);
-        dynGroup.add(sp);
-      }
-    }
-  });
 
   const applyCameraPreset = (preset: "3d" | "top") => {
     setCamPreset(preset);
