@@ -10,14 +10,16 @@ This directory holds intermediate mechanic design notes, Eugen-style (*Wargame /
 
 ## Stage 2 Specification Index (Rolling-Wave Roadmap)
 
-> **Rolling-Wave Planning Principle**: Phase 1 is locked for immediate sub-issue dispatch. Phases 2–4 serve as directional baselines and interface contracts so Phase 1 stays forward-compatible, and will be re-evaluated before execution reaches each phase.
+> **Rolling-Wave Planning Principle**: Phases 1–3 are completed on `feat/rts-core`. Phase 4 is next for sub-issue dispatch, followed by Phase 5 (core architecture refactor, true pathfinding, and RTS UI/UX overhaul) and Phase 6 (3D models & VFX polish).
 
 | Phase | Document | Status | Scope |
 | :--- | :--- | :--- | :--- |
-| **Phase 1** | [`phase1-map-spec.md`](./phase1-map-spec.md) | **Locked & Ready for Sub-Issues** | Fulda Gap (Point Alpha) OSM + 1m LiDAR DEM geo-substrate, 6-dimension `TerrainDef`, 3D Beer-Lambert sightlines, multi-story `Building`/`BuildingFloor`, 3D preview & LoS inspector (`1A` / `1B` / `1C`). |
-| **Phase 2** | [`phase2-combat-spec.md`](./phase2-combat-spec.md) | *Directional Baseline* | Two-tier `Contact`/`Visual` detection, 3-tier own-optics accuracy, directional `ke`/`ce` armor & `HE` inverse-square law, 4-tier morale & `Cowering`, infantry weapon takeover, vehicle patches. |
-| **Phase 3** | [`phase3-support-spec.md`](./phase3-support-spec.md) | *Directional Baseline* | Artillery (`HE_Impact`, `HE_Airburst`, `Smoke`, 2-round `Ranging`, `isPositionCalibrated`), 2× linear fixed-wing airspace & altitude/turnaround, helicopter forced landings, `FOB` vs. empty-on-entry `SupplyVehicle`, `WIA`/`KIA` recovery. |
-| **Phase 4** | [`phase4-units-and-bot-spec.md`](./phase4-units-and-bot-spec.md) | *Directional Baseline* | Minimal symmetric-asymmetric OOB (11 archetypes), zero-adaptation-cost `UnitTacticalContext -> TacticalAction` bot contract, and `SupportBroker` request–response network. |
+| **Phase 1** | [`phase1-map-spec.md`](./phase1-map-spec.md) | **Completed** | Fulda Gap (Point Alpha) OSM + 1m LiDAR DEM geo-substrate, 6-dimension `TerrainDef`, 3D Beer-Lambert sightlines, multi-story `Building`/`BuildingFloor`, 3D preview & LoS inspector (`1A` / `1B` / `1C`). |
+| **Phase 2** | [`phase2-combat-spec.md`](./phase2-combat-spec.md) | **Completed** | Direct command sandbox, two-tier `Contact`/`Visual` detection, 3-tier own-optics accuracy, directional `ke`/`ce` armor & `HE` inverse-square law, 4-tier morale & `Cowering`, infantry weapon takeover, vehicle patches, 60 FPS interpolation bridge (`2A`–`2D`). |
+| **Phase 3** | [`phase3-support-spec.md`](./phase3-support-spec.md) | **Completed** | Artillery (`HE_Impact`, `HE_Airburst`, `Smoke`, 2-round `Ranging`, `isPositionCalibrated`), 2× linear fixed-wing airspace & altitude/turnaround, helicopter forced landings, `FOB` vs. empty-on-entry `SupplyVehicle`, `WIA`/`KIA` recovery, Debug Spawner (`3A`–`3C`). |
+| **Phase 4** | [`phase4-units-and-bot-spec.md`](./phase4-units-and-bot-spec.md) | **Next Up — Ready for Sub-Issues** | Minimal symmetric-asymmetric OOB (11 archetypes), zero-adaptation-cost `UnitTacticalContext -> TacticalAction` bot contract, `SupportBroker` request–response network, and hiding LLM UI by default. |
+| **Phase 5** | [`phase5-refactor-and-ux-spec.md`](./phase5-refactor-and-ux-spec.md) | *Proposed Baseline* | Modularize `world.ts`, `SpatialHashGrid`, true `RoadNetwork` + `10m` grid A* pathfinding, `FormationSlot` & separation steering, diegetic map plates with `IconStacking`, `BoxSelect` + `ContextRightClick` + hotkeys. |
+| **Phase 6** | *(Planned Post-Phase 5)* | *Deferred* | Dedicated 3D unit silhouettes, animations, and high-fidelity combat VFX replacing temporary placeholders. |
 
 ---
 
@@ -101,3 +103,17 @@ All Stage 2 simulation modules and docs standardize on the following canonical E
 | `SupportRequestKind` | Union of Request Types | Ticket types emitted by frontline units (`artillery_he`, `artillery_smoke`, `air_strike`, `resupply_repairs`, reserved `transport_pickup`, `armor_support`). |
 | `SupportRequest` | Interface | Prioritized tactical ticket (`requesterId`, `kind`, `targetPos`, `urgency`, `hasObserverSight`, `ttl`). |
 | `SupportBroker` | Scheduler Component | Virtual dispatcher matching `SupportRequest` tickets to autonomous support units based on urgency, range, supply, and survivability. |
+
+### Phase 5 — Core Refactor, Pathfinding, Fundamentals & Direct-Manipulation UI/UX
+
+| Term / Identifier | Symbol / Type | Deterministic Definition |
+| :--- | :--- | :--- |
+| `SpatialHashGrid` | TypedArray Index | `Int32Array`-backed uniform spatial bucket index replacing $O(N^2)$ unit proximity queries. |
+| `RoadGraphPathfinder` | Pathfinding Module | Graph A* over Phase 1's `RoadNetwork` nodes/edges (including `isBridge` crossings) for fast road marches. |
+| `GridAStarPathfinder` | Pathfinding Module | `10m` raster A* using `TerrainDef.movementCost`, `isPassable()`, and slope constraints to route around water/cliffs. |
+| `FormationSlot` | Vec Offset Slot | Computed non-overlapping group arrival coordinates (`line` / `column` / `spread`) paired with separation steering. |
+| `IconStacking` | Camera-Distance UI | Automatic screen/world proximity clustering of adjacent unit plates when zoomed out, expanding on zoom-in or hover. |
+| `BoxSelect` | Mouse Gesture | Left-click marquee drag selecting multiple friendly units (`Shift` appends, `Ctrl+1..9` binds control groups). |
+| `ContextRightClick` | Mouse Gesture | Single right-click dispatches context-aware orders (`Move` on ground, `Attack` on enemy, `Garrison` on building, `Embark` on transport). |
+| `ReverseMove` | Tactical Order (`G`) | Short tactical withdrawal preserving the unit's `front` armor `heading` toward the active threat. |
+| `AttackMove` | Tactical Order (`Q`) | Advance along path and automatically halt to engage upon acquiring enemy `Visual`/`Contact` within weapon range. |
