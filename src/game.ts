@@ -4,7 +4,7 @@ import { Commander, OrderPayload } from "./agents/commander";
 import { RadioMsg, RadioNet } from "./comms/radio";
 import { PlayerPicture } from "./perception/player";
 import { COMPANY, PLAYER, buildScenario } from "./sim/scenario";
-import { SimEvent } from "./sim/world";
+import { Order, Roe, SimEvent } from "./sim/world";
 import type { Vec } from "./sim/map";
 
 export interface GameHooks {
@@ -47,6 +47,7 @@ export function createGame(model: LanguageModel, hooks: GameHooks, seed = 7) {
   let markerSeq = 0;
   let result: "win" | "loss" | undefined;
   let inspectorMode = false;
+  let aiCommanderEnabled = true;
 
   return {
     world, picture, battalionNet, commander: alpha6,
@@ -54,6 +55,34 @@ export function createGame(model: LanguageModel, hooks: GameHooks, seed = 7) {
     get result() { return result; },
     get inspectorMode() { return inspectorMode; },
     setInspectorMode(enabled: boolean) { inspectorMode = enabled; },
+    get aiCommanderEnabled() { return aiCommanderEnabled; },
+    setAiCommanderEnabled(enabled: boolean) { aiCommanderEnabled = enabled; },
+    /** Direct sandbox command bypassing radio/LLM latency. */
+    directCommand(unitId: string, order: Order, roe?: Roe) {
+      const u = world.get(unitId);
+      if (!u) return `unknown unit "${unitId}"`;
+      const res = world.command(u, order, roe);
+      if (res === "ok") {
+        picture.sync();
+      }
+      return res;
+    },
+    /** Direct sandbox command to move & garrison an infantry unit onto a BuildingFloor. */
+    garrisonBuildingFloor(unitId: string, buildingId: string, floorLevel: number) {
+      const u = world.get(unitId);
+      if (!u) return `unknown unit "${unitId}"`;
+      const res = world.orderGarrison(u, buildingId, floorLevel);
+      if (res === "ok" && !aiCommanderEnabled) picture.sync();
+      return res;
+    },
+    /** Direct sandbox command to exit a garrisoned BuildingFloor. */
+    exitBuilding(unitId: string) {
+      const u = world.get(unitId);
+      if (!u) return `unknown unit "${unitId}"`;
+      const res = world.vacateBuilding(u);
+      if (res === "ok") picture.sync();
+      return res;
+    },
     /** Player transmits to the company commander. Returns seconds until delivery. */
     radio(text: string) { return battalionNet.send(world.t, PLAYER, COMPANY, text); },
     /** Player map marker, shared with the company commander via data link. */
@@ -71,7 +100,7 @@ export function createGame(model: LanguageModel, hooks: GameHooks, seed = 7) {
       battalionNet.deliver(world.t);
       companyNet.deliver(world.t);
       picture.step();
-      alpha6.tick();
+      if (aiCommanderEnabled) alpha6.tick();
       return (result = outcome());
     },
   };

@@ -3,7 +3,7 @@ import { createDeepSeek } from "@ai-sdk/deepseek";
 import { AgentLog, createGame, Game } from "../game";
 import { clock } from "../perception/sitrep";
 import { COMPANY, PLAYER } from "../sim/scenario";
-import { STATS } from "../sim/world";
+import { OrderKind, Roe, STATS } from "../sim/world";
 import { LosObserver, Sandtable3D } from "../render/Sandtable3D";
 import { Building, BuildingFloor, MobilityClass, UnitTrait, Vec } from "../sim/map";
 
@@ -51,6 +51,10 @@ export const App: React.FC = () => {
   const [losObserver, setLosObserver] = useState<LosObserver | null>(null);
   const [selectedBuilding, setSelectedBuilding] = useState<{ building: Building; floorLevel: number } | null>(null);
   const [god, setGod] = useState(false);
+  const [aiCommander, setAiCommander] = useState(true);
+  const [selectedUnitId, setSelectedUnitId] = useState<string | null>(null);
+  const [pendingOrder, setPendingOrder] = useState<"move" | "attack" | "withdraw" | "garrison" | null>(null);
+  const [commandNote, setCommandNote] = useState<string | null>(null);
   const [showDebug, setShowDebug] = useState(false);
   const [markerMode, setMarkerMode] = useState(false);
   const [markerNote, setMarkerNote] = useState("");
@@ -123,6 +127,14 @@ export const App: React.FC = () => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length, game.agentThinking]);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPendingOrder(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const updateApiKey = (val: string) => {
     setApiKey(val);
     if (val.trim()) localStorage.setItem(KEY_STORAGE, val.trim());
@@ -157,10 +169,41 @@ export const App: React.FC = () => {
     }
   };
 
+  const toggleAiCommander = () => {
+    const next = !aiCommander;
+    setAiCommander(next);
+    game.setAiCommanderEnabled(next);
+  };
+
+  const toggleGod = () => {
+    const next = !god;
+    setGod(next);
+    if (!next && selectedUnitId) {
+      const u = world.get(selectedUnitId);
+      if (u?.side === "red") {
+        setSelectedUnitId(null);
+        setPendingOrder(null);
+      }
+    }
+  };
+
+  const handleSelectUnit = (unitId: string) => {
+    setSelectedUnitId((prev) => (prev === unitId ? null : unitId));
+    setPendingOrder(null);
+    setCommandNote(null);
+  };
+
   const handleMapClick = (pos: Vec, grid4: string) => {
     if (inspectorMode && !markerMode) {
       setSelectedBuilding(null);
       setLosObserver({ pos, eyeHeight: observerEyeH, label: `Terrain ${grid4} (+${observerEyeH}m)` });
+      return;
+    }
+    if (!inspectorMode && !markerMode && selectedUnitId && pendingOrder && pendingOrder !== "garrison") {
+      const res = game.directCommand(selectedUnitId, { kind: pendingOrder, dest: pos, destName: grid4 });
+      setCommandNote(res === "ok" ? `${selectedUnitId}: ${pendingOrder} → ${grid4}` : res);
+      setPendingOrder(null);
+      setTick((t) => t + 1);
       return;
     }
     if (markerMode) {
@@ -178,11 +221,13 @@ export const App: React.FC = () => {
 
   const handleSelectBuilding = (building: Building, floor: BuildingFloor) => {
     setSelectedBuilding({ building, floorLevel: floor.level });
-    setLosObserver({
-      pos: building.center,
-      eyeHeight: floor.elevationOffset,
-      label: `${building.id} F${floor.level} (+${floor.elevationOffset}m)`,
-    });
+    if (inspectorMode) {
+      setLosObserver({
+        pos: building.center,
+        eyeHeight: floor.elevationOffset,
+        label: `${building.id} F${floor.level} (+${floor.elevationOffset}m)`,
+      });
+    }
   };
 
   const stateBadge = (state: string) => {
@@ -201,11 +246,20 @@ export const App: React.FC = () => {
     );
   };
 
-  const unitRows = god
+  const unitRows = god || !aiCommander
     ? world.units
         .filter((u) => u.side === "blue")
         .map((u) => ({ id: u.id, type: u.type, state: u.state, strength: u.strength, engaging: !!u.target }))
     : picture.status;
+
+  const redRows = god
+    ? world.units
+        .filter((u) => u.side === "red")
+        .map((u) => ({ id: u.id, type: u.type, state: u.state, strength: u.strength, engaging: !!u.target }))
+    : [];
+
+  const selectedUnit = selectedUnitId ? world.get(selectedUnitId) : undefined;
+  const selectedTelemetry = selectedUnit ? world.getUnitTelemetry(selectedUnit) : undefined;
 
   const inspectPos = hoverPos ?? losObserver?.pos ?? null;
   const inspectDef = inspectPos ? world.map.terrainDefAt(inspectPos) : null;
@@ -220,11 +274,19 @@ export const App: React.FC = () => {
         god={god}
         markerMode={markerMode}
         inspectorMode={inspectorMode}
+        orderTargetMode={!!pendingOrder && pendingOrder !== "garrison"}
+        allowBuildingSelect={
+          inspectorMode ||
+          (!!selectedUnit && selectedUnit.traits.includes("infantry") && (!pendingOrder || pendingOrder === "garrison"))
+        }
+        selectedUnitId={selectedUnitId}
         losObserver={losObserver}
         selectedBuilding={selectedBuilding}
         onMapClick={handleMapClick}
         onHoverPos={setHoverPos}
         onSelectBuilding={handleSelectBuilding}
+        onSelectUnit={handleSelectUnit}
+        onCancelOrder={() => setPendingOrder(null)}
       />
 
       {/* Top-left flex column stack: prevents top bar wrap from overlapping left HUD card */}
@@ -305,7 +367,14 @@ export const App: React.FC = () => {
           />
         )}
         <span style={{ color: "#786f60" }}>|</span>
-        <button style={btnStyle(god)} onClick={() => setGod((g) => !g)} title="Debug: show ground-truth positions">
+        <button
+          style={{ ...btnStyle(aiCommander), background: aiCommander ? "#15803d" : "#b45309", color: "#fff" }}
+          onClick={toggleAiCommander}
+          title="Toggle Alpha 6 LLM Commander ON/OFF (OFF runs direct-command sandbox without API key)"
+        >
+          AI Commander: {aiCommander ? "ON" : "OFF"}
+        </button>
+        <button style={btnStyle(god)} onClick={toggleGod} title="Debug: show ground-truth positions & allow selecting Red units">
           God
         </button>
         <button style={btnStyle(showDebug)} onClick={() => setShowDebug((d) => !d)} title="Debug: LLM context & tool calls">
@@ -489,10 +558,12 @@ export const App: React.FC = () => {
         </div>
         <div style={{ fontSize: 11, color: "#6e6555", marginBottom: 8 }}>
           {god
-            ? "GOD MODE: live ground truth"
-            : picture.syncedAt < 0
-              ? "Status & contacts: awaiting first radio sync with Alpha 6"
-              : `Status & contacts synced at ${clock(picture.syncedAt)} (${world.t - picture.syncedAt}s ago)`}
+            ? "GOD MODE: live ground truth (click Blue or Red to command)"
+            : !aiCommander
+              ? "SANDBOX: click any unit or 3D sprite for direct orders"
+              : picture.syncedAt < 0
+                ? "Status & contacts: awaiting first radio sync with Alpha 6"
+                : `Status & contacts synced at ${clock(picture.syncedAt)} (${world.t - picture.syncedAt}s ago)`}
         </div>
 
         {unitRows.length === 0 ? (
@@ -501,28 +572,205 @@ export const App: React.FC = () => {
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-            {unitRows.map((u) => (
-              <div
-                key={u.id}
-                style={{
-                  padding: "6px 8px",
-                  background: "rgba(235, 229, 215, 0.65)",
-                  borderRadius: 4,
-                  border: "1px solid #d4cbb8",
+            {unitRows.map((u) => {
+              const isSel = selectedUnitId === u.id;
+              return (
+                <div
+                  key={u.id}
+                  onClick={() => handleSelectUnit(u.id)}
+                  style={{
+                    padding: "6px 8px",
+                    background: isSel ? "#dbeafe" : "rgba(235, 229, 215, 0.65)",
+                    borderRadius: 4,
+                    border: `1px solid ${isSel ? "#2563eb" : "#d4cbb8"}`,
+                    cursor: "pointer",
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <strong>{u.id}</strong>
+                    {stateBadge(u.state)}
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, color: "#524a3e", fontSize: 11 }}>
+                    <span>{STATS[u.type].label}</span>
+                    <span style={{ fontFamily: "ui-monospace, monospace" }}>
+                      str {Math.round(u.strength)}%{u.engaging ? " · ENGAGING" : ""}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {god && redRows.length > 0 && (
+          <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid #cfc6b4" }}>
+            <strong style={{ fontSize: 11.5, color: "#991b1b" }}>RED FORCES (GOD)</strong>
+            <div style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 5 }}>
+              {redRows.map((u) => {
+                const isSel = selectedUnitId === u.id;
+                return (
+                  <div
+                    key={u.id}
+                    onClick={() => handleSelectUnit(u.id)}
+                    style={{
+                      padding: "5px 8px",
+                      background: isSel ? "#fee2e2" : "rgba(242, 226, 222, 0.65)",
+                      borderRadius: 4,
+                      border: `1px solid ${isSel ? "#dc2626" : "#dfc2be"}`,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <strong>{u.id}</strong>
+                      {stateBadge(u.state)}
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 2, color: "#524a3e", fontSize: 10.5 }}>
+                      <span>{STATS[u.type].label}</span>
+                      <span style={{ fontFamily: "ui-monospace, monospace" }}>str {Math.round(u.strength)}%</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {selectedUnit && selectedTelemetry && (
+          <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid #cfc6b4", display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <strong style={{ fontSize: 12 }}>DIRECT ORDER: {selectedUnit.id}</strong>
+              <button style={{ ...btnStyle(), padding: "1px 6px" }} onClick={() => { setSelectedUnitId(null); setPendingOrder(null); }}>
+                ×
+              </button>
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+              {(["move", "attack", "withdraw"] as const).map((kind) => (
+                <button
+                  key={kind}
+                  style={btnStyle(pendingOrder === kind)}
+                  onClick={() => { setPendingOrder((p) => (p === kind ? null : kind)); setCommandNote(null); }}
+                >
+                  {kind[0].toUpperCase() + kind.slice(1)}
+                </button>
+              ))}
+              {selectedUnit.traits.includes("infantry") && (
+                <button
+                  style={btnStyle(pendingOrder === "garrison")}
+                  onClick={() => { setPendingOrder((p) => (p === "garrison" ? null : "garrison")); setCommandNote(null); }}
+                >
+                  Garrison
+                </button>
+              )}
+              <button
+                style={btnStyle(selectedUnit.order.kind === "hold" && !pendingOrder)}
+                onClick={() => {
+                  setPendingOrder(null);
+                  const res = game.directCommand(selectedUnit.id, { kind: "hold" as OrderKind });
+                  setCommandNote(res === "ok" ? `${selectedUnit.id}: holding` : res);
+                  setTick((t) => t + 1);
                 }}
               >
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <strong>{u.id}</strong>
-                  {stateBadge(u.state)}
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, color: "#524a3e", fontSize: 11 }}>
-                  <span>{STATS[u.type].label}</span>
-                  <span style={{ fontFamily: "ui-monospace, monospace" }}>
-                    str {Math.round(u.strength)}%{u.engaging ? " · ENGAGING" : ""}
-                  </span>
-                </div>
+                Hold
+              </button>
+            </div>
+            {pendingOrder && (
+              <div style={{ fontSize: 10.5, color: "#1d4ed8", fontWeight: 600 }}>
+                {pendingOrder === "garrison"
+                  ? "Click a highlighted 3D building to select floor (Esc/right-click cancels)."
+                  : `Click terrain on 3D map to dispatch ${pendingOrder.toUpperCase()} (Esc/right-click cancels).`}
               </div>
-            ))}
+            )}
+            <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 10.5, color: "#524a3e" }}>ROE:</span>
+              {(["fire_at_will", "return_fire", "hold_fire"] as Roe[]).map((r) => (
+                <button
+                  key={r}
+                  style={{ ...btnStyle(selectedUnit.roe === r), fontSize: 10, padding: "2px 6px" }}
+                  onClick={() => {
+                    const res = game.directCommand(selectedUnit.id, selectedUnit.order, r);
+                    setCommandNote(res === "ok" ? `${selectedUnit.id} ROE: ${r}` : res);
+                    setTick((t) => t + 1);
+                  }}
+                >
+                  {r === "fire_at_will" ? "Fire" : r === "return_fire" ? "Return" : "Hold"}
+                </button>
+              ))}
+            </div>
+
+            {selectedUnit.traits.includes("infantry") && (
+              <div style={{ background: "rgba(235,229,215,0.65)", padding: 6, borderRadius: 4, fontSize: 10.5 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <strong>Garrison ({selectedUnit.headcount} pax)</strong>
+                  {selectedUnit.garrison && (
+                    <button
+                      style={{ ...btnStyle(), fontSize: 10, padding: "2px 6px" }}
+                      onClick={() => {
+                        const res = game.exitBuilding(selectedUnit.id);
+                        setCommandNote(res === "ok" ? `${selectedUnit.id} exited building` : res);
+                        setTick((t) => t + 1);
+                      }}
+                    >
+                      Exit Building
+                    </button>
+                  )}
+                </div>
+                {selectedBuilding ? (
+                  <div style={{ marginTop: 4, display: "flex", flexDirection: "column", gap: 3 }}>
+                    <span style={{ color: "#4b4338" }}>Click floor on {selectedBuilding.building.id} to garrison:</span>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                      {selectedBuilding.building.floors.map((fl) => (
+                        <button
+                          key={fl.level}
+                          style={{
+                            ...btnStyle(selectedUnit.garrison?.buildingId === selectedBuilding.building.id && selectedUnit.garrison?.floorLevel === fl.level),
+                            fontSize: 10,
+                            padding: "2px 6px",
+                          }}
+                          onClick={() => {
+                            const res = game.garrisonBuildingFloor(selectedUnit.id, selectedBuilding.building.id, fl.level);
+                            setPendingOrder(null);
+                            setCommandNote(
+                              res === "ok"
+                                ? selectedUnit.garrison?.buildingId === selectedBuilding.building.id
+                                  ? `${selectedUnit.id} garrisoned ${selectedBuilding.building.id} F${fl.level}`
+                                  : `${selectedUnit.id} moving to garrison ${selectedBuilding.building.id} F${fl.level}`
+                                : res,
+                            );
+                            setTick((t) => t + 1);
+                          }}
+                        >
+                          Garrison F{fl.level} (cap {fl.capacity})
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ color: "#6e6555", marginTop: 2 }}>Click any 3D building to assign floor.</div>
+                )}
+              </div>
+            )}
+
+            {commandNote && (
+              <div style={{ fontSize: 10.5, color: "#0369a1", fontFamily: "ui-monospace, monospace" }}>{commandNote}</div>
+            )}
+
+            {/* Live Selected-Unit Telemetry */}
+            <div style={{ background: "rgba(235,229,215,0.6)", padding: 6, borderRadius: 4, fontSize: 10.5, fontFamily: "ui-monospace, monospace" }}>
+              <div><strong>Telemetry</strong> · mob: {selectedUnit.mobility}</div>
+              <div>bodySig: <b>{selectedTelemetry.bodySignature.toFixed(2)}</b> · muzzle: {selectedUnit.muzzleSignature} ({selectedUnit.weaponClass})</div>
+              <div>
+                ter: <b>{selectedTelemetry.terrainId}</b> (sig×{selectedTelemetry.modifiers.signatureMult ?? 1}, dmg×{selectedTelemetry.modifiers.damageMult ?? 1})
+              </div>
+              <div>
+                inBuilding: <b>{selectedTelemetry.garrison ? `${selectedTelemetry.garrison.buildingId} F${selectedTelemetry.garrison.floorLevel} (+${selectedTelemetry.garrison.elevationOffset}m)` : "no"}</b>
+              </div>
+              <div style={{ marginTop: 2 }}>
+                <strong>ownPerception:</strong>{" "}
+                {selectedTelemetry.ownPerception.length === 0
+                  ? "none"
+                  : selectedTelemetry.ownPerception.map((p) => `${p.targetId}:${p.level}`).join(", ")}
+              </div>
+            </div>
           </div>
         )}
 
@@ -568,7 +816,9 @@ export const App: React.FC = () => {
             <div style={{ fontSize: 11, color: "#6e6555" }}>You: {PLAYER} · Sub: {COMPANY}</div>
           </div>
           <div style={{ fontSize: 11, fontFamily: "ui-monospace, monospace" }}>
-            {game.agentThinking ? (
+            {!aiCommander ? (
+              <span style={{ color: "#b45309", fontWeight: 700 }}>AI OFF — SANDBOX</span>
+            ) : game.agentThinking ? (
               <span style={{ color: "#b45309", fontWeight: 700 }}>ALPHA 6 THINKING…</span>
             ) : battalionNet.busy(world.t) ? (
               <span style={{ color: "#1d4ed8", fontWeight: 700 }}>TX ON AIR ({battalionNet.backlog})</span>

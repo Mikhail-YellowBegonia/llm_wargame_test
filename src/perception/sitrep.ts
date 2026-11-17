@@ -1,7 +1,13 @@
 // "Who knows what": turns world state into the text a given commander is allowed to know.
 // This is the single gate for information asymmetry.
 import { bearingName, dist, Vec } from "../sim/map";
-import { STATS, Unit, World } from "../sim/world";
+import { STATS, Unit, WeaponSignatureClass, World } from "../sim/world";
+
+const WEAPON_CLASS_LABEL: Record<WeaponSignatureClass, string> = {
+  small_arms: "small-arms",
+  light_weapon: "light-weapon",
+  heavy_weapon: "heavy-weapon",
+};
 
 export const clock = (t: number) => {
   const h = 6 + Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = Math.floor(t % 60);
@@ -35,10 +41,17 @@ export function companySitrep(world: World, commander: string, pendingOrders?: R
     const supp = u.suppression >= 15 ? `, suppressed ${Math.round(u.suppression)}%` : "";
     const inFlight = pendingOrders?.get(u.id);
     const transit = inFlight ? ` (order in transit: ${inFlight})` : "";
+    const garrisoned = u.garrison ? `, garrisoned ${u.garrison.buildingId} F${u.garrison.floorLevel}` : "";
     const tgt = u.target ? world.get(u.target) : undefined;
-    const engaging = tgt ? `, engaging ${STATS[tgt.type].label} at grid ${world.map.toGrid(tgt.pos)}` : "";
+    const tgtContact = u.target ? world.contacts.blue.get(u.target) : undefined;
+    const tgtDesc = tgtContact?.level === "visual" && tgtContact.type
+      ? STATS[tgtContact.type].label
+      : tgt
+        ? `${WEAPON_CLASS_LABEL[tgtContact?.weaponClass ?? tgt.weaponClass]} contact`
+        : "";
+    const engaging = tgt ? `, engaging ${tgtDesc} at grid ${world.map.toGrid(tgt.pos)}` : "";
     lines.push(
-      `- ${u.id} (${STATS[u.type].label}): at ${world.map.describe(u.pos)} in ${world.map.terrainAt(u.pos)}, ${stateWord[u.state]}, ${strengthWord(u.strength)}${supp}, ` +
+      `- ${u.id} (${STATS[u.type].label}): at ${world.map.describe(u.pos)} in ${world.map.terrainAt(u.pos)}${garrisoned}, ${stateWord[u.state]}, ${strengthWord(u.strength)}${supp}, ` +
         `order: ${orderWord(world, u)}${transit}, ROE: ${u.roe}${engaging}`,
     );
   }
@@ -50,7 +63,10 @@ export function companySitrep(world: World, commander: string, pendingOrders?: R
     const age = world.t - c.seenAt;
     const nearest = own.filter((u) => u.state !== "destroyed").sort((a, b) => dist(a.pos, c.pos) - dist(b.pos, c.pos))[0];
     const rel = nearest ? `, ${Math.round(dist(nearest.pos, c.pos) / 50) * 50}m ${bearingName(nearest.pos, c.pos)} of ${nearest.id}` : "";
-    lines.push(`- ${STATS[c.type].label} at ${world.map.describe(c.pos)}${rel}; ${age < 20 ? "in sight now" : `last seen ${Math.round(age / 60)} min ago`} (by ${c.seenBy})`);
+    const label = c.level === "visual" && c.type
+      ? STATS[c.type].label
+      : `unidentified ${c.weaponClass ? WEAPON_CLASS_LABEL[c.weaponClass] : "enemy"} contact`;
+    lines.push(`- ${label} at ${world.map.describe(c.pos)}${rel}; ${age < 20 ? "in sight now" : `last seen ${Math.round(age / 60)} min ago`} (by ${c.seenBy})`);
   }
   const markers = world.map.places.filter((p) => p.kind === "marker");
   if (markers.length) {

@@ -4,7 +4,13 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import ms from "milsymbol";
 import { Game } from "../game";
 import { Building, BuildingFloor, TERRAIN_DEFS, TERRAIN_IDS, Vec } from "../sim/map";
-import { UnitType } from "../sim/world";
+import { UnitType, WeaponSignatureClass } from "../sim/world";
+
+const WEAPON_TAG: Record<WeaponSignatureClass, string> = {
+  small_arms: "SA",
+  light_weapon: "LW",
+  heavy_weapon: "HW",
+};
 
 const SIDC: Record<"blue" | "red", Record<UnitType, string>> = {
   blue: {
@@ -42,6 +48,60 @@ function getUnitTexture(side: "blue" | "red", type: UnitType, label: string): TH
   return tex;
 }
 
+function getContactTexture(tag: string): THREE.Texture {
+  const key = `contact:${tag}`;
+  let tex = texCache.get(key);
+  if (!tex) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 128;
+    canvas.height = 128;
+    const ctx = canvas.getContext("2d")!;
+    // Red hostile diamond with crisp light outline
+    ctx.save();
+    ctx.translate(64, 52);
+    ctx.beginPath();
+    ctx.moveTo(0, -38);
+    ctx.lineTo(38, 0);
+    ctx.lineTo(0, 38);
+    ctx.lineTo(-38, 0);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(220, 38, 38, 0.92)";
+    ctx.fill();
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = "#f6f2e8";
+    ctx.stroke();
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = "#450a0a";
+    ctx.stroke();
+    // Centered '?' inside diamond
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 38px ui-sans-serif, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("?", 0, 2);
+    ctx.restore();
+    // High-contrast SA / LW / HW badge below diamond
+    ctx.fillStyle = "#111827";
+    ctx.strokeStyle = "#fde047";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.roundRect(34, 88, 60, 30, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#fde047";
+    ctx.font = "bold 20px ui-monospace, monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(tag, 64, 104);
+
+    tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.needsUpdate = true;
+    texCache.set(key, tex);
+  }
+  return tex;
+}
+
 export interface LosObserver {
   pos: Vec;
   eyeHeight: number;
@@ -53,11 +113,16 @@ interface Props {
   god: boolean;
   markerMode: boolean;
   inspectorMode: boolean;
+  orderTargetMode: boolean;
+  allowBuildingSelect: boolean;
+  selectedUnitId: string | null;
   losObserver: LosObserver | null;
   selectedBuilding: { building: Building; floorLevel: number } | null;
   onMapClick: (pos: Vec, grid4: string) => void;
   onHoverPos: (pos: Vec | null) => void;
   onSelectBuilding: (building: Building, floor: BuildingFloor) => void;
+  onSelectUnit: (unitId: string) => void;
+  onCancelOrder?: () => void;
 }
 
 interface FloorInstanceMeta {
@@ -82,7 +147,10 @@ function buildingOrientedBox(footprint: ReadonlyArray<Vec>) {
 }
 
 export const Sandtable3D: React.FC<Props> = (props) => {
-  const { game, god, markerMode, inspectorMode, losObserver, selectedBuilding, onMapClick, onHoverPos, onSelectBuilding } = props;
+  const {
+    game, god, markerMode, inspectorMode, orderTargetMode,
+    selectedUnitId, losObserver, selectedBuilding,
+  } = props;
   const { map } = game.world;
 
   const mountRef = useRef<HTMLDivElement>(null);
@@ -101,6 +169,7 @@ export const Sandtable3D: React.FC<Props> = (props) => {
     floorMeta: FloorInstanceMeta[];
     losGroup: THREE.Group;
     dynGroup: THREE.Group;
+    hoveredIdx: number;
   } | null>(null);
 
   // Build static 3D terrain, roads, instanced canopies & multi-story buildings once per GameMap
@@ -327,7 +396,7 @@ export const Sandtable3D: React.FC<Props> = (props) => {
     scene.add(losGroup);
     scene.add(dynGroup);
 
-    sceneRef.current = { scene, camera, controls, terrainMesh, buildingMesh, floorMeta, losGroup, dynGroup };
+    sceneRef.current = { scene, camera, controls, terrainMesh, buildingMesh, floorMeta, losGroup, dynGroup, hoveredIdx: -1 };
 
     // Raycasting pointer handlers
     const raycaster = new THREE.Raycaster();
@@ -339,11 +408,20 @@ export const Sandtable3D: React.FC<Props> = (props) => {
       ndc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(ndc, camera);
+      const selectableSprites = dynGroup.children.filter(
+        (c): c is THREE.Sprite => c instanceof THREE.Sprite && typeof c.userData?.unitId === "string",
+      );
+      if (selectableSprites.length > 0 && !propsRef.current.orderTargetMode) {
+        const sHits = raycaster.intersectObjects(selectableSprites, false);
+        if (sHits.length > 0) {
+          return { pos: { x: sHits[0].point.x, y: -sHits[0].point.z }, unitId: sHits[0].object.userData.unitId as string };
+        }
+      }
       if (buildingMesh) {
         const bHits = raycaster.intersectObject(buildingMesh, false);
         if (bHits.length > 0 && bHits[0].instanceId !== undefined) {
-          const meta = floorMeta[bHits[0].instanceId];
-          return { pos: { x: bHits[0].point.x, y: -bHits[0].point.z }, buildingMeta: meta };
+          const idx = bHits[0].instanceId;
+          return { pos: { x: bHits[0].point.x, y: -bHits[0].point.z }, buildingMeta: floorMeta[idx], floorIdx: idx };
         }
       }
       const tHits = raycaster.intersectObject(terrainMesh, false);
@@ -353,25 +431,56 @@ export const Sandtable3D: React.FC<Props> = (props) => {
       return null;
     };
 
+    const paintBuildings = (hoveredIdx: number) => {
+      if (!buildingMesh) return;
+      const selHi = new THREE.Color("#38bdf8");
+      const hovHi = new THREE.Color("#fbbf24");
+      const sel = propsRef.current.selectedBuilding;
+      floorMeta.forEach((m, idx) => {
+        const isSel = sel && m.building.id === sel.building.id && m.floor.level === sel.floorLevel;
+        buildingMesh!.setColorAt(idx, isSel ? selHi : idx === hoveredIdx ? hovHi : m.baseColor);
+      });
+      if (buildingMesh.instanceColor) buildingMesh.instanceColor.needsUpdate = true;
+    };
+
     const onDown = (e: PointerEvent) => { downPos = { x: e.clientX, y: e.clientY }; };
     const onMove = (e: PointerEvent) => {
       const hit = getHit(e);
       propsRef.current.onHoverPos(hit && map.inBounds(hit.pos) ? hit.pos : null);
+      const nextHov = propsRef.current.allowBuildingSelect && hit?.floorIdx !== undefined ? hit.floorIdx : -1;
+      if (sceneRef.current && sceneRef.current.hoveredIdx !== nextHov) {
+        sceneRef.current.hoveredIdx = nextHov;
+        paintBuildings(nextHov);
+      }
     };
     const onUp = (e: PointerEvent) => {
-      if (e.button !== 0 || Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y) > 5) return;
+      if (Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y) > 5) return;
+      if (e.button === 2 && propsRef.current.orderTargetMode) {
+        propsRef.current.onCancelOrder?.();
+        return;
+      }
+      if (e.button !== 0) return;
       const hit = getHit(e);
-      if (!hit || !map.inBounds(hit.pos)) return;
-      if (hit.buildingMeta && propsRef.current.inspectorMode) {
+      if (!hit) return;
+      if (hit.unitId) {
+        propsRef.current.onSelectUnit(hit.unitId);
+        return;
+      }
+      if (!map.inBounds(hit.pos)) return;
+      if (hit.buildingMeta && propsRef.current.allowBuildingSelect) {
         propsRef.current.onSelectBuilding(hit.buildingMeta.building, hit.buildingMeta.floor);
       } else {
         propsRef.current.onMapClick(hit.pos, map.toGrid(hit.pos, 4));
       }
     };
+    const onContext = (e: MouseEvent) => {
+      if (propsRef.current.orderTargetMode) e.preventDefault();
+    };
 
     renderer.domElement.addEventListener("pointerdown", onDown);
     renderer.domElement.addEventListener("pointermove", onMove);
     renderer.domElement.addEventListener("pointerup", onUp);
+    renderer.domElement.addEventListener("contextmenu", onContext);
 
     const onResize = () => {
       const nw = container.clientWidth || window.innerWidth;
@@ -412,6 +521,7 @@ export const Sandtable3D: React.FC<Props> = (props) => {
       renderer.domElement.removeEventListener("pointerdown", onDown);
       renderer.domElement.removeEventListener("pointermove", onMove);
       renderer.domElement.removeEventListener("pointerup", onUp);
+      renderer.domElement.removeEventListener("contextmenu", onContext);
       controls.dispose();
       terrainTex.dispose();
       renderer.dispose();
@@ -420,14 +530,15 @@ export const Sandtable3D: React.FC<Props> = (props) => {
     };
   }, [map]);
 
-  // Highlight selected building floor
+  // Highlight selected or hovered building floor
   useEffect(() => {
     const ctx = sceneRef.current;
     if (!ctx?.buildingMesh) return;
     const hi = new THREE.Color("#38bdf8");
+    const hov = new THREE.Color("#fbbf24");
     ctx.floorMeta.forEach((m, idx) => {
       const isSel = selectedBuilding && m.building.id === selectedBuilding.building.id && m.floor.level === selectedBuilding.floorLevel;
-      ctx.buildingMesh!.setColorAt(idx, isSel ? hi : m.baseColor);
+      ctx.buildingMesh!.setColorAt(idx, isSel ? hi : idx === ctx.hoveredIdx ? hov : m.baseColor);
     });
     if (ctx.buildingMesh.instanceColor) ctx.buildingMesh.instanceColor.needsUpdate = true;
   }, [selectedBuilding]);
@@ -522,12 +633,23 @@ export const Sandtable3D: React.FC<Props> = (props) => {
     }
 
     const { world, picture } = game;
+    const liveBlue = god || !game.aiCommanderEnabled;
     const bluePos = new Map<string, Vec>();
-    if (god) {
+    if (liveBlue) {
       for (const u of world.units) if (u.side === "blue" && u.state !== "destroyed") bluePos.set(u.id, u.pos);
     } else {
       for (const t of picture.tracks) bluePos.set(t.id, t.pos);
     }
+
+    const addSelectionRing = (pos: Vec, color: string) => {
+      const pts: THREE.Vector3[] = [];
+      const elev = map.elevationAt(pos) + 3;
+      for (let i = 0; i < 24; i++) {
+        const a = (i / 24) * Math.PI * 2;
+        pts.push(new THREE.Vector3(pos.x + Math.cos(a) * 38, elev, -(pos.y + Math.sin(a) * 38)));
+      }
+      dynGroup.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color })));
+    };
 
     for (const u of world.units) {
       if (u.side !== "blue" || u.state === "destroyed") continue;
@@ -535,11 +657,13 @@ export const Sandtable3D: React.FC<Props> = (props) => {
       const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: getUnitTexture("blue", u.type, u.id.replace("Alpha ", "A")), depthTest: false }));
       sp.position.set(pos.x, map.elevationAt(pos) + 26, -pos.y);
       sp.scale.set(90, 90, 1);
+      sp.userData = { unitId: u.id, side: "blue" };
       dynGroup.add(sp);
+      if (selectedUnitId === u.id) addSelectionRing(pos, "#0284c7");
     }
 
-    const orders = god
-      ? world.units.filter((u) => u.side === "blue" && u.order?.dest).map((u) => ({ unit: u.id, dest: u.order!.dest! }))
+    const orders = liveBlue
+      ? world.units.filter((u) => u.side === "blue" && u.state !== "destroyed" && u.order?.dest).map((u) => ({ unit: u.id, dest: u.order!.dest! }))
       : picture.orders.filter((o) => o.order.dest).map((o) => ({ unit: o.unit, dest: o.order.dest! }));
     for (const o of orders) {
       const from = bluePos.get(o.unit);
@@ -551,14 +675,35 @@ export const Sandtable3D: React.FC<Props> = (props) => {
       dynGroup.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color: "#1d4ed8" })));
     }
 
-    const reds = god
-      ? world.units.filter((u) => u.side === "red" && u.state !== "destroyed").map((u) => ({ id: u.id, type: u.type, pos: u.pos }))
-      : picture.contacts.map((c) => ({ id: c.id, type: c.type, pos: c.pos }));
-    for (const r of reds) {
-      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: getUnitTexture("red", r.type, r.id.replace("Red ", "R")), depthTest: false }));
-      sp.position.set(r.pos.x, map.elevationAt(r.pos) + 26, -r.pos.y);
-      sp.scale.set(90, 90, 1);
-      dynGroup.add(sp);
+    if (god) {
+      for (const u of world.units) {
+        if (u.side !== "red" || u.state === "destroyed") continue;
+        const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: getUnitTexture("red", u.type, u.id.replace("Red ", "R")), depthTest: false }));
+        sp.position.set(u.pos.x, map.elevationAt(u.pos) + 26, -u.pos.y);
+        sp.scale.set(90, 90, 1);
+        sp.userData = { unitId: u.id, side: "red" };
+        dynGroup.add(sp);
+        if (selectedUnitId === u.id) addSelectionRing(u.pos, "#dc2626");
+        if (u.order?.dest) {
+          const g = new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(u.pos.x, map.elevationAt(u.pos) + 10, -u.pos.y),
+            new THREE.Vector3(u.order.dest.x, map.elevationAt(u.order.dest) + 10, -u.order.dest.y),
+          ]);
+          dynGroup.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color: "#b91c1c" })));
+        }
+      }
+    } else {
+      const contactSource = !game.aiCommanderEnabled ? [...world.contacts.blue.values()] : picture.contacts;
+      for (const c of contactSource) {
+        const tex =
+          c.level === "visual" && c.type
+            ? getUnitTexture("red", c.type, c.id.replace("Red ", "R"))
+            : getContactTexture(c.weaponClass ? WEAPON_TAG[c.weaponClass] : "?");
+        const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
+        sp.position.set(c.pos.x, map.elevationAt(c.pos) + 26, -c.pos.y);
+        sp.scale.set(90, 90, 1);
+        dynGroup.add(sp);
+      }
     }
   });
 
@@ -576,7 +721,7 @@ export const Sandtable3D: React.FC<Props> = (props) => {
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
-      <div ref={mountRef} style={{ width: "100%", height: "100%", cursor: markerMode || inspectorMode ? "crosshair" : "grab" }} />
+      <div ref={mountRef} style={{ width: "100%", height: "100%", cursor: markerMode || inspectorMode || orderTargetMode ? "crosshair" : "grab" }} />
 
       {/* Projected 2D labels for places & player markers */}
       <div ref={labelsRef} style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden" }}>
