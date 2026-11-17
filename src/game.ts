@@ -46,11 +46,14 @@ export function createGame(model: LanguageModel, hooks: GameHooks, seed = 7) {
 
   let markerSeq = 0;
   let result: "win" | "loss" | undefined;
+  let inspectorMode = false;
 
   return {
     world, picture, battalionNet, commander: alpha6,
     get agentThinking() { return alpha6.thinking; },
     get result() { return result; },
+    get inspectorMode() { return inspectorMode; },
+    setInspectorMode(enabled: boolean) { inspectorMode = enabled; },
     /** Player transmits to the company commander. Returns seconds until delivery. */
     radio(text: string) { return battalionNet.send(world.t, PLAYER, COMPANY, text); },
     /** Player map marker, shared with the company commander via data link. */
@@ -60,9 +63,9 @@ export function createGame(model: LanguageModel, hooks: GameHooks, seed = 7) {
       return name;
     },
     removeMarker(name: string) { world.map.places = world.map.places.filter((p) => !(p.kind === "marker" && p.name === name)); },
-    /** Advance one game second. */
+    /** Advance one game second (paused automatically in Map Inspector mode). */
     step() {
-      if (result) return result;
+      if (result || inspectorMode) return result;
       world.step();
       script();
       battalionNet.deliver(world.t);

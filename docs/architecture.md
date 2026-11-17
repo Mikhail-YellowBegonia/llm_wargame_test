@@ -31,9 +31,9 @@ Simulation World (src/sim/)
 | `src/perception/sitrep.ts` | Converts `World` into text that `Alpha 6` is allowed to know (`companySitrep` with terrain cover, suppression %, engaged target, and in-flight orders; `describeLocation`; `placesBrief`). | `src/sim/*` |
 | `src/perception/player.ts` | `PlayerPicture`: enforces player information rules (30s friendly position datalink, unit status + enemy contacts synced only on `Steel 6 <-> Alpha 6` radio delivery, company orders intercepted after 10s). | `src/sim/*` |
 | `src/agents/commander.ts` | `Commander`: event-driven LLM runner (4s wakeup debounce, 6-step limit, tools: `describe_location`, `order_platoon`, `radio_superior`), ephemeral sitrep injection (stripped from history after turn). | `ai`, `zod`, `src/comms/*`, `src/perception/*` |
-| `src/game.ts` | UI-agnostic coordinator wiring `World`, `RadioNet`s, `PlayerPicture`, and `Commander`. | All core modules |
-| `src/render/PaperMap.tsx` | Full-screen SVG staff map: `d3-contour` elevation lines, terrain cells, `milsymbol` NATO APP-6 symbols, plotted orders, markers, zoom/pan. | `react`, `d3-contour`, `milsymbol` |
-| `src/ui/App.tsx` | Floating windows over the map: clock/speed bar, Alpha Co. status overview, Battalion Net chat, LLM Debug drawer, and browser `localStorage` DeepSeek API key input (falls back to Vite `/api/deepseek` proxy in local dev). | `react`, `@ai-sdk/deepseek`, `src/game.ts` |
+| `src/game.ts` | UI-agnostic coordinator wiring `World`, `RadioNet`s, `PlayerPicture`, and `Commander`, with `inspectorMode` pause toggle. | All core modules |
+| `src/render/Sandtable3D.tsx` | Full-screen Three.js 3D terrain sandtable: 10m terrain mesh with slope/contour shading, road ribbons, GPU-instanced canopies and multi-story buildings, NATO sprites, orbit/top-down camera presets, and radial 3D Beer-Lambert LoS transmittance fan. | `react`, `three`, `milsymbol` |
+| `src/ui/App.tsx` | Floating windows over the 3D sandtable: clock/speed bar, Map Inspector GIS/LoS HUD (no API key needed), Alpha Co. status overview, Battalion Net chat, LLM Debug drawer, and browser `localStorage` DeepSeek API key input. | `react`, `@ai-sdk/deepseek`, `src/game.ts` |
 | `src/cli.ts` | Terminal prototype loop (`npm run play`). | Node `readline`, `src/game.ts` |
 | `scripts/headless.ts` | Deterministic no-LLM combat runner (`npm run headless`). | `src/sim/*` |
 | `.github/workflows/ci.yml` | Automated CI gate (`typecheck`, `build`, `headless`) on pushes and PRs to `main` and `feat/**`. | GitHub Actions |

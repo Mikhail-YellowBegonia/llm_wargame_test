@@ -4,8 +4,8 @@ import { AgentLog, createGame, Game } from "../game";
 import { clock } from "../perception/sitrep";
 import { COMPANY, PLAYER } from "../sim/scenario";
 import { STATS } from "../sim/world";
-import { PaperMap } from "../render/PaperMap";
-import { Vec } from "../sim/map";
+import { LosObserver, Sandtable3D } from "../render/Sandtable3D";
+import { Building, BuildingFloor, MobilityClass, UnitTrait, Vec } from "../sim/map";
 
 interface ChatEntry {
   id: number;
@@ -38,17 +38,24 @@ const btnStyle = (active = false): React.CSSProperties => ({
 
 const KEY_STORAGE = "wargame_deepseek_key";
 const metaEnv = (import.meta as unknown as { env: { DEV?: boolean; WARGAME_MODEL?: string } }).env;
+const MOBILITIES: readonly MobilityClass[] = ["foot", "wheeled", "tracked", "amphibious"];
+const TRAITS: readonly UnitTrait[] = ["infantry", "vehicle", "armored", "low_profile", "tall_profile"];
 
 export const App: React.FC = () => {
   const [, setTick] = useState(0);
   const [speed, setSpeed] = useState(2);
   const [paused, setPaused] = useState(false); // Debug only
+  const [inspectorMode, setInspectorMode] = useState(false);
+  const [observerEyeH, setObserverEyeH] = useState(2.0);
+  const [hoverPos, setHoverPos] = useState<Vec | null>(null);
+  const [losObserver, setLosObserver] = useState<LosObserver | null>(null);
+  const [selectedBuilding, setSelectedBuilding] = useState<{ building: Building; floorLevel: number } | null>(null);
   const [god, setGod] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
   const [markerMode, setMarkerMode] = useState(false);
   const [markerNote, setMarkerNote] = useState("");
   const [apiKey, setApiKey] = useState(() => localStorage.getItem(KEY_STORAGE) ?? "");
-  const [showKeyInput, setShowKeyInput] = useState(() => !metaEnv.DEV && !localStorage.getItem(KEY_STORAGE));
+  const [showKeyInput, setShowKeyInput] = useState(false);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatEntry[]>([]);
   const [agentLogs, setAgentLogs] = useState<AgentLog[]>([]);
@@ -95,11 +102,11 @@ export const App: React.FC = () => {
   const game = gameRef.current;
   const { world, picture, battalionNet } = game;
 
-  // Main simulation loop
+  // Main simulation loop (paused when Map Inspector is active)
   useEffect(() => {
     let acc = 0;
     const id = setInterval(() => {
-      if (paused || game.result) return;
+      if (paused || inspectorMode || game.result) return;
       acc += 0.1 * speed;
       let stepped = false;
       while (acc >= 1) {
@@ -110,7 +117,7 @@ export const App: React.FC = () => {
       if (stepped) setTick((t) => t + 1);
     }, 100);
     return () => clearInterval(id);
-  }, [game, speed, paused]);
+  }, [game, speed, paused, inspectorMode]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -140,7 +147,22 @@ export const App: React.FC = () => {
     setTick((t) => t + 1);
   };
 
+  const toggleInspector = () => {
+    const next = !inspectorMode;
+    setInspectorMode(next);
+    game.setInspectorMode(next);
+    if (!next) {
+      setLosObserver(null);
+      setSelectedBuilding(null);
+    }
+  };
+
   const handleMapClick = (pos: Vec, grid4: string) => {
+    if (inspectorMode && !markerMode) {
+      setSelectedBuilding(null);
+      setLosObserver({ pos, eyeHeight: observerEyeH, label: `Terrain ${grid4} (+${observerEyeH}m)` });
+      return;
+    }
     if (markerMode) {
       const name = game.addMarker(pos, markerNote.trim() || undefined);
       setMarkerNote("");
@@ -154,9 +176,13 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleRemoveMarker = (name: string) => {
-    game.removeMarker(name);
-    setTick((t) => t + 1);
+  const handleSelectBuilding = (building: Building, floor: BuildingFloor) => {
+    setSelectedBuilding({ building, floorLevel: floor.level });
+    setLosObserver({
+      pos: building.center,
+      eyeHeight: floor.elevationOffset,
+      label: `${building.id} F${floor.level} (+${floor.elevationOffset}m)`,
+    });
   };
 
   const stateBadge = (state: string) => {
@@ -181,40 +207,80 @@ export const App: React.FC = () => {
         .map((u) => ({ id: u.id, type: u.type, state: u.state, strength: u.strength, engaging: !!u.target }))
     : picture.status;
 
+  const inspectPos = hoverPos ?? losObserver?.pos ?? null;
+  const inspectDef = inspectPos ? world.map.terrainDefAt(inspectPos) : null;
+  const inspectSlope = inspectPos ? world.map.slopeAt(inspectPos) : 0;
+  const inspectElev = inspectPos ? world.map.elevationAt(inspectPos) : 0;
+
   return (
     <div style={{ position: "relative", width: "100vw", height: "100vh", overflow: "hidden" }}>
-      {/* Full-screen Paper Map */}
-      <PaperMap
+      {/* Full-screen Three.js 3D Sandtable */}
+      <Sandtable3D
         game={game}
         god={god}
         markerMode={markerMode}
+        inspectorMode={inspectorMode}
+        losObserver={losObserver}
+        selectedBuilding={selectedBuilding}
         onMapClick={handleMapClick}
-        onRemoveMarker={handleRemoveMarker}
+        onHoverPos={setHoverPos}
+        onSelectBuilding={handleSelectBuilding}
       />
 
-      {/* Top-left floating bar: Clock, speed, marker tool, debug toggles */}
+      {/* Top-left flex column stack: prevents top bar wrap from overlapping left HUD card */}
+      <div
+        style={{
+          position: "absolute",
+          top: 16,
+          left: 16,
+          bottom: 58,
+          maxWidth: "calc(100vw - 380px)",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "flex-start",
+          gap: 10,
+          pointerEvents: "none",
+        }}
+      >
       <div
         style={{
           ...panelStyle,
-          position: "absolute",
-          top: 20,
-          left: 20,
+          pointerEvents: "auto",
           padding: "8px 12px",
           display: "flex",
           alignItems: "center",
           gap: 10,
           fontSize: 13,
+          flexWrap: "wrap",
         }}
       >
         <strong style={{ fontFamily: "ui-monospace, monospace", fontSize: 15 }}>{clock(world.t)}</strong>
         <span style={{ color: "#786f60" }}>|</span>
         <div style={{ display: "flex", gap: 4 }}>
           {[1, 2, 4, 8].map((s) => (
-            <button key={s} style={btnStyle(speed === s && !paused)} onClick={() => { setPaused(false); setSpeed(s); }}>
+            <button key={s} style={btnStyle(speed === s && !paused && !inspectorMode)} onClick={() => { setPaused(false); setSpeed(s); }}>
               {s}x
             </button>
           ))}
         </div>
+        <span style={{ color: "#786f60" }}>|</span>
+        <button
+          style={{ ...btnStyle(inspectorMode), background: inspectorMode ? "#0369a1" : "#ede6d6" }}
+          onClick={toggleInspector}
+          title="Pause combat & LLM turns to inspect 6D terrain stats, building floors, and 3D Beer-Lambert LoS fans (no API key needed)"
+        >
+          {inspectorMode ? "Map Inspector ON" : "Map Inspector"}
+        </button>
+        {inspectorMode && (
+          <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11.5 }}>
+            <span>Eye:</span>
+            {[1.8, 2.8, 10].map((h) => (
+              <button key={h} style={btnStyle(observerEyeH === h)} onClick={() => setObserverEyeH(h)}>
+                {h}m
+              </button>
+            ))}
+          </div>
+        )}
         <span style={{ color: "#786f60" }}>|</span>
         <button
           style={btnStyle(markerMode)}
@@ -279,14 +345,138 @@ export const App: React.FC = () => {
         )}
       </div>
 
-      {/* Left floating window: Unit Overview (synced on radio contact) */}
+      {/* Left floating window: GIS Map Inspector (when active) or Unit Overview */}
+      {inspectorMode ? (
+        <div
+          style={{
+            ...panelStyle,
+            pointerEvents: "auto",
+            width: 300,
+            maxHeight: "100%",
+            padding: "10px 12px",
+            fontSize: 11.5,
+            overflowY: "auto",
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <strong style={{ fontSize: 13 }}>GIS / 3D LoS INSPECTOR</strong>
+            {losObserver && (
+              <button style={btnStyle()} onClick={() => { setLosObserver(null); setSelectedBuilding(null); }}>
+                Clear LoS
+              </button>
+            )}
+          </div>
+          <div style={{ fontSize: 11, color: "#524a3e" }}>
+            Click terrain to cast a 2km 3D Beer-Lambert LoS fan, or click a building to inspect floors & elevated vantage points.
+          </div>
+
+          {losObserver && (
+            <div style={{ padding: "6px 8px", background: "#e0f2fe", border: "1px solid #7dd3fc", borderRadius: 4 }}>
+              <strong>Observer:</strong> {losObserver.label}
+              <div style={{ marginTop: 4, display: "flex", gap: 8, fontSize: 10.5 }}>
+                <span style={{ color: "#15803d" }}>■ T = 1 Clear</span>
+                <span style={{ color: "#c2410c" }}>■ 0 &lt; T &lt; 1 Foliage</span>
+                <span style={{ color: "#b91c1c" }}>■ T = 0 Blocked</span>
+              </div>
+            </div>
+          )}
+
+          {inspectPos && inspectDef ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, borderTop: "1px solid #cfc6b4", paddingTop: 6 }}>
+              <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 11 }}>
+                <strong>Grid {world.map.toGrid(inspectPos, 6)}</strong> · {Math.round(inspectElev)}m · slope {inspectSlope.toFixed(1)}°
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ width: 12, height: 12, borderRadius: 2, background: inspectDef.meta.colorHex, border: "1px solid #555", display: "inline-block" }} />
+                <strong>{inspectDef.meta.name}</strong> <code>({inspectDef.id})</code>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, background: "rgba(235,229,215,0.6)", padding: 6, borderRadius: 4 }}>
+                <span>Move cost: <b>{inspectDef.movementCost}</b></span>
+                <span>Speed mult: <b>{inspectDef.speedMultiplier}x</b></span>
+                <span>Base sig: <b>{inspectDef.baseSignature}</b></span>
+                <span>T@100m: <b>{inspectDef.transmittancePer100m}</b></span>
+                <span>Canopy: <b>{inspectDef.canopyHeight}m</b></span>
+                <span>Max slope: <b>{inspectDef.passability.maxSlopeDeg}°</b></span>
+              </div>
+              <div>
+                <strong>Passability:</strong>{" "}
+                {MOBILITIES.map((m) => (
+                  <span
+                    key={m}
+                    style={{
+                      display: "inline-block",
+                      marginRight: 4,
+                      marginTop: 2,
+                      padding: "1px 5px",
+                      borderRadius: 3,
+                      fontSize: 10.5,
+                      background: world.map.isPassable(inspectPos, m) ? "#dcfce7" : "#fee2e2",
+                      color: world.map.isPassable(inspectPos, m) ? "#166534" : "#991b1b",
+                    }}
+                  >
+                    {m}
+                  </span>
+                ))}
+              </div>
+              <div>
+                <strong>Trait Modifiers:</strong>
+                {TRAITS.every((tr) => !inspectDef.traitModifiers[tr]) ? (
+                  <div style={{ fontSize: 10.5, color: "#6e6555" }}>None (1.0 neutral)</div>
+                ) : (
+                  TRAITS.map((tr) => {
+                    const mod = inspectDef.traitModifiers[tr];
+                    if (!mod) return null;
+                    return (
+                      <div key={tr} style={{ fontFamily: "ui-monospace, monospace", fontSize: 10.5, color: "#4b4338" }}>
+                        · {tr}: sig {mod.signatureMult ?? 1}, dmg {mod.damageMult ?? 1}, sup {mod.suppressionMult ?? 1}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          ) : (
+            <div style={{ color: "#786f60", fontStyle: "italic" }}>Hover or click any cell to inspect 6D terrain stats.</div>
+          )}
+
+          {selectedBuilding && (
+            <div style={{ borderTop: "1px solid #cfc6b4", paddingTop: 6 }}>
+              <strong>Building {selectedBuilding.building.id}</strong> (roof +{selectedBuilding.building.roofHeight}m, {selectedBuilding.building.floors.length} floors)
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+                {selectedBuilding.building.floors.map((fl) => {
+                  const active = fl.level === selectedBuilding.floorLevel;
+                  return (
+                    <button
+                      key={fl.level}
+                      onClick={() => handleSelectBuilding(selectedBuilding.building, fl)}
+                      style={{
+                        ...btnStyle(active),
+                        textAlign: "left",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        fontSize: 11,
+                      }}
+                    >
+                      <span>F{fl.level} (+{fl.elevationOffset}m) · {fl.state}</span>
+                      <span>cap {fl.capacity} · dmg {fl.modifiers.damageMult ?? 1}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
       <div
         style={{
           ...panelStyle,
-          position: "absolute",
-          top: 72,
-          left: 20,
+          pointerEvents: "auto",
           width: 265,
+          maxHeight: "100%",
+          overflowY: "auto",
           padding: "10px 12px",
           fontSize: 12,
         }}
@@ -348,6 +538,8 @@ export const App: React.FC = () => {
           </div>
         )}
       </div>
+      )}
+      </div>
 
       {/* Right floating window: Radio Net */}
       <div
@@ -396,8 +588,8 @@ export const App: React.FC = () => {
             color: "#3f382e",
           }}
         >
-          <strong>Mission:</strong> Seize village of <strong>Kessel [2030]</strong>. Alpha Co. is assembled at{" "}
-          <strong>Brandt [2004]</strong>.
+          <strong>Mission:</strong> Fulda Gap — Advance past <strong>Point Alpha [2323]</strong> and seize{" "}
+          <strong>Geisa [3513]</strong>. Alpha Co. stages from <strong>Rasdorf Approach [0316]</strong>.
         </div>
 
         {/* Radio log */}
@@ -458,7 +650,7 @@ export const App: React.FC = () => {
               borderTop: "1px solid #cfc6b4",
             }}
           >
-            {game.result === "win" ? "VICTORY — Kessel Secured" : "DEFEAT — Alpha Co. Combat Ineffective"}
+            {game.result === "win" ? "VICTORY — Geisa Secured" : "DEFEAT — Alpha Co. Combat Ineffective"}
           </div>
         )}
 
