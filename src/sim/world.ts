@@ -1,6 +1,6 @@
 // Simulation core: units, platoon-level bot state machine, two-tier spotting, 10m mobility/garrison,
-// Phase 2B 3-tier own-optics accuracy, directional KE/CE armor, HE inverse-square penetration,
-// multi-weapon mutex concurrency, and InfantrySubRoster casualty takeover.
+// Phase 2B own-optics accuracy, directional KE/CE armor, HE inverse-square law, infantry takeover,
+// Phase 2C 4-tier morale, SuppressionFloor, Cowering, morale events, and vehicle patches.
 import { ArmorValue, CombatModifiers, DEFAULT_BUILDING_ARMOR, GameMap, MobilityClass, TerrainId, UnitTrait, Vec, dist, rng } from "./map";
 
 export type { ArmorValue };
@@ -15,6 +15,8 @@ export interface UnitGarrison {
 export interface Order { kind: OrderKind; dest?: Vec; destName?: string; garrison?: UnitGarrison }
 
 export type BotState = "holding" | "moving" | "pinned" | "broken" | "destroyed";
+export type MoraleTier = "calm" | "worried" | "shaken" | "panicked";
+export type MoraleEventKind = "SupplyBonus" | "CombatFeatBonus" | "IsolationPenalty" | "ArtilleryShockPenalty";
 export type DetectionLevel = "contact" | "visual";
 export type WeaponSignatureClass = "small_arms" | "light_weapon" | "heavy_weapon";
 export type OwnPerceptionLevel = "none" | DetectionLevel;
@@ -83,6 +85,8 @@ interface TypeStats {
   range: number;
   spot: number;
   baseSpeedKmH: number;
+  passengerCapacity?: number;
+  hasFiringPorts?: boolean;
   armor: ArmorProfile;
   weapons: ReadonlyArray<Omit<WeaponSlot, "cooldown">>;
 }
@@ -174,6 +178,8 @@ export const STATS: Record<UnitType, TypeStats> = {
     range: 1800,
     spot: 2000,
     baseSpeedKmH: 30,
+    passengerCapacity: 1,
+    hasFiringPorts: true,
     armor: {
       front: { ke: 5, ce: 6 },
       side: { ke: 3, ce: 3 },
@@ -418,11 +424,22 @@ export interface Unit {
   muzzleSignature: number;
   garrison?: UnitGarrison;
   settledTicks: number;
+  stuckTicks: number;
+  embarkedIn?: string;
+  embarkedIds: string[];
+  activeMoraleEvents: MoraleEventKind[];
   ownPerception: Map<string, OwnPerceptionLevel>;
   armor: ArmorProfile;
   weapons: WeaponSlot[];
   mutexCooldowns: Map<string, number>;
   subRoster?: InfantrySubRoster;
+}
+
+export interface SupplyNode {
+  id: string;
+  side: Side;
+  pos: Vec;
+  radius: number;
 }
 
 export interface Contact {
@@ -443,6 +460,13 @@ export interface UnitTelemetry {
   garrison?: UnitGarrison & { elevationOffset: number };
   ownPerception: { targetId: string; level: OwnPerceptionLevel }[];
   armor: ArmorProfile;
+  morale: number;
+  moraleTier: MoraleTier;
+  cowering: boolean;
+  suppression: number;
+  activeMoraleEvents: MoraleEventKind[];
+  embarkedIn?: string;
+  embarkedIds: string[];
   weaponSlots: { id: string; name: string; ammo: AmmoType; cooldown: number; mutexGroup?: string; mutexLocked: boolean }[];
   subRoster?: {
     personnel: Record<SpecialistRole, number>;
@@ -459,6 +483,26 @@ export interface SimEvent { t: number; kind: EventKind; unit: string; text: stri
 const SETTLE_THRESHOLD_TICKS = 15;
 const MUZZLE_FLASH_WINDOW = 2;
 const FRIENDLY_CONTACT_SHARE_WINDOW = 15;
+const COMBAT_FEAT_WINDOW = 12;
+const ARTILLERY_SHOCK_WINDOW = 10;
+export const MORALE_WORRIED_MIDPOINT = 62.5;
+export const MORALE_SHAKEN_MIDPOINT = 37.5;
+const COWERING_SIG_MULT = 0.65;
+const COWERING_OPTICS_MULT = 0.6;
+const COWERING_COVER_DMG_MULT = 0.7;
+
+export function getMoraleTier(morale: number): MoraleTier {
+  if (morale >= 75) return "calm";
+  if (morale >= 50) return "worried";
+  if (morale >= 25) return "shaken";
+  return "panicked";
+}
+
+export function isCowering(u: Pick<Unit, "morale">): boolean {
+  const tier = getMoraleTier(u.morale);
+  return tier === "shaken" || tier === "panicked";
+}
+
 export const OWN_PERCEPTION_ACCURACY: Record<OwnPerceptionLevel, number> = {
   none: 0.25,
   contact: 0.7,
@@ -571,12 +615,17 @@ export class World {
   units: Unit[] = [];
   contacts: Record<Side, Map<string, Contact>> = { blue: new Map(), red: new Map() };
   events: SimEvent[] = [];
+  supplyNodes: SupplyNode[] = [];
   private listeners: ((e: SimEvent) => void)[] = [];
   private random: () => number;
   private casualtyMarks = new Map<string, number>();
   private underFireReported = new Map<string, number>();
+  private combatFeatUntil: Record<Side, number> = { blue: -1e9, red: -1e9 };
+  private artilleryShockUntil = new Map<string, number>();
 
   constructor(readonly map: GameMap, seed = 1) { this.random = rng(seed); }
+
+  addSupplyNode(node: SupplyNode) { this.supplyNodes.push(node); }
 
   on(fn: (e: SimEvent) => void) { this.listeners.push(fn); }
   private emit(kind: EventKind, u: Unit, text: string) {
@@ -590,7 +639,8 @@ export class World {
       Unit,
       | "heading" | "strength" | "suppression" | "morale" | "state" | "lastFiredAt" | "lastHitAt" | "roe" | "order"
       | "mobility" | "traits" | "headcount" | "eyeHeight" | "baseSignature" | "weaponClass" | "muzzleSignature"
-      | "settledTicks" | "ownPerception" | "armor" | "weapons" | "mutexCooldowns"
+      | "settledTicks" | "stuckTicks" | "embarkedIds" | "activeMoraleEvents"
+      | "ownPerception" | "armor" | "weapons" | "mutexCooldowns"
     > & Partial<Unit>,
   ) {
     const st = STATS[u.type];
@@ -612,6 +662,9 @@ export class World {
       weaponClass: st.weaponClass,
       muzzleSignature: st.muzzleSignature,
       settledTicks: 0,
+      stuckTicks: 0,
+      embarkedIds: [],
+      activeMoraleEvents: [],
       ownPerception: new Map(),
       armor: cloneArmor(st.armor),
       weapons: cloneWeapons(st.weapons),
@@ -710,8 +763,21 @@ export class World {
     return this.unitFloor(u)?.elevationOffset ?? u.eyeHeight;
   }
 
-  unitModifiers(u: Unit): CombatModifiers {
+  private baseCoverModifiers(u: Unit): CombatModifiers {
     return this.unitFloor(u)?.modifiers ?? this.map.getTerrainModifiers(u.pos, u.traits);
+  }
+
+  unitModifiers(u: Unit): CombatModifiers {
+    const base = this.baseCoverModifiers(u);
+    if (!isCowering(u)) return base;
+    return {
+      ...base,
+      damageMult: (base.damageMult ?? 1) * COWERING_COVER_DMG_MULT,
+    };
+  }
+
+  effectiveSpotRange(u: Unit): number {
+    return STATS[u.type].spot * (isCowering(u) ? COWERING_OPTICS_MULT : 1.0);
   }
 
   computeBodySignature(u: Unit): number {
@@ -724,7 +790,38 @@ export class World {
         : u.traits.includes("infantry") && u.settledTicks >= SETTLE_THRESHOLD_TICKS
           ? 0.75
           : 1.0;
-    return u.baseSignature * terBase * sigMult * moveMult;
+    const cowerMult = isCowering(u) ? COWERING_SIG_MULT : 1.0;
+    return u.baseSignature * terBase * sigMult * moveMult * cowerMult;
+  }
+
+  /** Embark an infantry unit onto a friendly APC/IFV transport. */
+  embark(passenger: Unit, transport: Unit): string {
+    if (passenger.state === "destroyed" || transport.state === "destroyed") return "unit destroyed";
+    if (!passenger.traits.includes("infantry")) return `${passenger.id} is not infantry`;
+    if (passenger.side !== transport.side) return "cannot embark on enemy vehicle";
+    const cap = STATS[transport.type].passengerCapacity ?? 0;
+    if (cap <= 0) return `${transport.id} has no passenger capacity`;
+    if (transport.embarkedIds.length >= cap) return `${transport.id} is full`;
+    if (passenger.embarkedIn) this.disembark(passenger);
+    if (passenger.garrison) this.vacateBuilding(passenger);
+    passenger.embarkedIn = transport.id;
+    passenger.pos = { ...transport.pos };
+    passenger.order = { kind: "hold" };
+    passenger.state = "holding";
+    transport.embarkedIds.push(passenger.id);
+    return "ok";
+  }
+
+  /** Disembark a passenger unit from its current transport. */
+  disembark(passenger: Unit): string {
+    if (!passenger.embarkedIn) return "not embarked";
+    const tr = this.get(passenger.embarkedIn);
+    if (tr) {
+      tr.embarkedIds = tr.embarkedIds.filter((id) => id !== passenger.id);
+      passenger.pos = { ...tr.pos };
+    }
+    passenger.embarkedIn = undefined;
+    return "ok";
   }
 
   // ---------- InfantrySubRoster casualty & assignment ----------
@@ -856,6 +953,13 @@ export class World {
       garrison: floor && u.garrison ? { ...u.garrison, elevationOffset: floor.elevationOffset } : undefined,
       ownPerception: [...u.ownPerception.entries()].map(([targetId, level]) => ({ targetId, level })),
       armor: u.armor,
+      morale: u.morale,
+      moraleTier: getMoraleTier(u.morale),
+      cowering: isCowering(u),
+      suppression: u.suppression,
+      activeMoraleEvents: [...u.activeMoraleEvents],
+      embarkedIn: u.embarkedIn,
+      embarkedIds: [...u.embarkedIds],
       weaponSlots,
       subRoster: u.subRoster && assignments
         ? {
@@ -881,17 +985,23 @@ export class World {
     for (const u of live) this.bot(u);
   }
 
+  private moraleRofRate(u: Unit): number {
+    return 0.5 + 0.5 * (u.morale / 100);
+  }
+
   private tickCooldowns(u: Unit) {
+    const rate = this.moraleRofRate(u);
     for (const w of u.weapons) {
-      if (w.cooldown > 0) w.cooldown = Math.max(0, w.cooldown - 1);
+      if (w.cooldown > 0) w.cooldown = Math.max(0, w.cooldown - rate);
     }
     for (const [grp, cd] of u.mutexCooldowns) {
-      if (cd <= 1) u.mutexCooldowns.delete(grp);
-      else u.mutexCooldowns.set(grp, cd - 1);
+      const next = cd - rate;
+      if (next <= 0) u.mutexCooldowns.delete(grp);
+      else u.mutexCooldowns.set(grp, next);
     }
     if (u.subRoster) {
       for (const w of u.subRoster.weapons) {
-        if (w.cooldown > 0) w.cooldown = Math.max(0, w.cooldown - 1);
+        if (w.cooldown > 0) w.cooldown = Math.max(0, w.cooldown - rate);
       }
     }
   }
@@ -913,7 +1023,7 @@ export class World {
   private evaluatePerception(o: Unit, e: Unit): OwnPerceptionLevel {
     const res = this.sightlineBetween(o, e);
     if (res.blocked) return "none";
-    const spotRange = STATS[o.type].spot;
+    const spotRange = this.effectiveSpotRange(o);
     if (res.distance <= spotRange * this.computeBodySignature(e) * res.transmittance) {
       return "visual";
     }
@@ -976,7 +1086,7 @@ export class World {
       const known = this.contacts[side];
       const observers = live.filter((o) => o.side === side);
       for (const e of live) {
-        if (e.side === side) continue;
+        if (e.side === side || e.embarkedIn) continue;
         let visualObserver: Unit | undefined;
         let contactObserver: Unit | undefined;
 
@@ -1008,11 +1118,13 @@ export class World {
     const attMods = this.unitModifiers(attacker);
     const stateMult = attacker.state === "moving" ? 0.65 : attacker.state === "pinned" ? 0.45 : 1.0;
     const suppMult = Math.max(0.25, 1 - attacker.suppression / 160);
+    const moraleAccMult = 0.5 + 0.5 * (attacker.morale / 100);
     const rangeMult = Math.max(0.5, 1 - 0.35 * (distance / Math.max(1, slot.range)));
     const raw =
       slot.accuracy *
       opticsMult *
       efficiency *
+      moraleAccMult *
       (attacker.strength / 100) *
       suppMult *
       stateMult *
@@ -1023,7 +1135,8 @@ export class World {
 
   private maxWeaponRange(u: Unit): number {
     if (u.subRoster) {
-      return u.subRoster.weapons.reduce((m, w) => Math.max(m, w.weapon.range), 0);
+      const r = u.subRoster.weapons.reduce((m, w) => Math.max(m, w.weapon.range), 0);
+      return u.embarkedIn ? Math.min(r * 0.5, 300) : r;
     }
     return u.weapons.reduce((m, w) => Math.max(m, w.range), STATS[u.type].range);
   }
@@ -1033,7 +1146,7 @@ export class World {
     let target: Unit | undefined;
     let best = Infinity;
     for (const e of this.alive()) {
-      if (e.side === u.side) continue;
+      if (e.side === u.side || e.embarkedIn) continue;
       const d = dist(u.pos, e.pos);
       if (d > maxR) continue;
       const own = u.ownPerception.get(e.id) ?? "none";
@@ -1111,12 +1224,21 @@ export class World {
     if (u.roe === "hold_fire" || u.state === "broken") return;
     if (u.roe === "return_fire" && this.t - u.lastHitAt > 30) return;
 
+    const transport = u.embarkedIn ? this.get(u.embarkedIn) : undefined;
+    if (u.embarkedIn) {
+      if (!transport || transport.state === "destroyed" || !STATS[transport.type].hasFiringPorts) {
+        u.target = undefined;
+        return;
+      }
+      u.pos = { ...transport.pos };
+    }
+
     const target = this.selectTarget(u);
     u.target = target?.id;
     if (!target) return;
 
     const d = dist(u.pos, target.pos);
-    if (u.state !== "moving") u.heading = Math.atan2(target.pos.y - u.pos.y, target.pos.x - u.pos.x);
+    if (!transport && u.state !== "moving") u.heading = Math.atan2(target.pos.y - u.pos.y, target.pos.x - u.pos.x);
 
     const shots: {
       slot: Omit<WeaponSlot, "cooldown">;
@@ -1126,17 +1248,20 @@ export class World {
 
     if (u.subRoster) {
       for (const a of this.assignInfantryWeapons(u)) {
-        if (a.slot.cooldown <= 0 && d <= a.slot.weapon.range) {
+        if (transport && a.slot.weapon.weaponClass === "heavy_weapon") continue; // no backblast weapons from firing ports
+        const effRange = transport ? Math.min(a.slot.weapon.range * 0.5, 300) : a.slot.weapon.range;
+        const portMult = transport ? 0.5 : 1.0;
+        if (a.slot.cooldown <= 0 && d <= effRange) {
           shots.push({
-            slot: a.slot.weapon,
-            efficiency: a.efficiency,
+            slot: { ...a.slot.weapon, range: effRange },
+            efficiency: a.efficiency * portMult,
             onFired: () => {
               a.slot.cooldown = Math.ceil(a.slot.weapon.reloadSec / Math.max(0.25, a.efficiency));
             },
           });
         }
       }
-    } else {
+    } else if (!transport) {
       for (const w of this.selectVehicleSlotsToFire(u, target, d)) {
         shots.push({
           slot: w,
@@ -1223,21 +1348,95 @@ export class World {
     }
   }
 
-  private hit(u: Unit, dmg: number, supp: number, by: Unit) {
+  /** Cover-linked suppression resistance: reduces incoming suppression based on (1 - cover damageMult). */
+  computeSuppressionResistance(u: Unit): number {
+    const baseDmgMult = this.baseCoverModifiers(u).damageMult ?? 1;
+    const coverReduction = Math.max(0, Math.min(0.85, 1 - baseDmgMult));
+    return 1 - 0.6 * coverReduction;
+  }
+
+  /** Apply an HE indirect blast (supports Phase 2C ArtilleryShockPenalty and Phase 3 artillery). */
+  applyHeArtilleryBlast(
+    blastPos: Vec,
+    penContact: number,
+    d0: number,
+    yieldDamage = 35,
+    yieldSuppression = 45,
+    blastHeightOffset = 0,
+    by?: Unit,
+  ) {
+    const maxRadius = Math.max(20, d0 * 6);
+    for (const u of this.alive()) {
+      if (u.embarkedIn) continue;
+      const d = dist(u.pos, blastPos);
+      if (d > maxRadius) continue;
+      const falloff = 1 / (1 + (d / Math.max(0.5, d0)) ** 2);
+      const mods = this.unitModifiers(u);
+      const isOpenUnarmored = !u.traits.includes("armored") && !u.garrison && this.map.terrainIdAt(u.pos) === "open";
+
+      if (isOpenUnarmored) {
+        const supp = yieldSuppression * falloff;
+        const shock = yieldDamage * falloff * 1.4;
+        const hp = yieldDamage * falloff * 0.5;
+        this.artilleryShockUntil.set(u.id, this.t + ARTILLERY_SHOCK_WINDOW);
+        if (!u.activeMoraleEvents.includes("ArtilleryShockPenalty")) {
+          u.activeMoraleEvents.push("ArtilleryShockPenalty");
+        }
+        this.hit(u, hp, supp, by, { unboundedMoraleDrain: shock });
+      } else {
+        const penRes = evaluateHePenetration(
+          u.armor,
+          u.pos,
+          u.heading,
+          blastPos,
+          blastHeightOffset,
+          penContact,
+          d0,
+          u.traits.includes("armored"),
+        );
+        const dmg = penRes.penetrated ? yieldDamage * falloff * (mods.damageMult ?? 1) : 0;
+        const supp = yieldSuppression * falloff * (mods.suppressionMult ?? 1);
+        this.hit(u, dmg, supp, by);
+      }
+    }
+  }
+
+  private hit(u: Unit, dmg: number, supp: number, by?: Unit, opts?: { unboundedMoraleDrain?: number }) {
     if (u.state === "destroyed") return;
+    const resistedSupp = supp * this.computeSuppressionResistance(u);
     u.strength = Math.max(0, u.strength - dmg);
-    u.suppression = Math.min(100, u.suppression + supp);
-    u.morale = Math.max(0, u.morale - dmg * 0.6);
+    u.suppression = Math.min(100, u.suppression + resistedSupp);
     u.lastHitAt = this.t;
 
-    const sideKnown = this.contacts[u.side].get(by.id);
-    if (!sideKnown || sideKnown.seenAt < this.t) {
-      this.recordContact(u.side, by, "contact", u.id, by.weaponClass);
+    if (opts?.unboundedMoraleDrain !== undefined) {
+      u.morale = Math.max(0, u.morale - opts.unboundedMoraleDrain);
+    } else if (dmg > 0) {
+      u.morale = Math.max(0, u.morale - dmg * 0.6);
+      if (by) this.combatFeatUntil[by.side] = this.t + COMBAT_FEAT_WINDOW;
+    } else if (resistedSupp > 0 && u.morale > MORALE_SHAKEN_MIDPOINT) {
+      // SuppressionFloor: non-damaging suppression cannot push morale below shaken midpoint
+      u.morale = Math.max(MORALE_SHAKEN_MIDPOINT, u.morale - resistedSupp * 0.25);
     }
 
-    if (this.t - (this.underFireReported.get(u.id) ?? -1e9) > 90) {
-      this.underFireReported.set(u.id, this.t);
-      this.emit("under_fire", u, `taking fire from the ${bearingWord(u.pos, by.pos)}`);
+    // Vehicle minor patch: proportional damage & suppression transfer to embarked passengers
+    if (u.embarkedIds.length > 0) {
+      for (const pid of [...u.embarkedIds]) {
+        const passenger = this.get(pid);
+        if (passenger && passenger.state !== "destroyed") {
+          this.hit(passenger, dmg * 0.35, resistedSupp * 0.5, by);
+        }
+      }
+    }
+
+    if (by) {
+      const sideKnown = this.contacts[u.side].get(by.id);
+      if (!sideKnown || sideKnown.seenAt < this.t) {
+        this.recordContact(u.side, by, "contact", u.id, by.weaponClass);
+      }
+      if (this.t - (this.underFireReported.get(u.id) ?? -1e9) > 90) {
+        this.underFireReported.set(u.id, this.t);
+        this.emit("under_fire", u, `taking fire from the ${bearingWord(u.pos, by.pos)}`);
+      }
     }
     for (const mark of [75, 50, 25]) {
       if (u.strength < mark && (this.casualtyMarks.get(u.id) ?? 100) > mark) {
@@ -1247,24 +1446,79 @@ export class World {
     }
     if (u.strength < 8) {
       this.vacateBuilding(u);
+      for (const pid of [...u.embarkedIds]) {
+        const p = this.get(pid);
+        if (p) this.disembark(p);
+      }
       u.state = "destroyed";
       this.syncRosterCasualtiesFromStrength(u);
       this.emit("destroyed", u, `${u.id} has been destroyed`);
-      this.emit("enemy_destroyed", by, `destroyed enemy ${STATS[u.type].label}`);
+      if (by) this.emit("enemy_destroyed", by, `destroyed enemy ${STATS[u.type].label}`);
     } else if (dmg > 0) {
       this.syncRosterCasualtiesFromStrength(u);
     }
   }
 
   // ---------- platoon bot (finite state machine) ----------
+  private updateMoraleAndEvents(u: Unit, recentlyHit: boolean) {
+    const events: MoraleEventKind[] = [];
+    const inSupply = this.supplyNodes.some((n) => n.side === u.side && dist(u.pos, n.pos) <= n.radius);
+    if (inSupply) {
+      events.push("SupplyBonus");
+      u.morale = Math.min(100, u.morale + 1.2);
+      u.suppression = Math.max(0, u.suppression - 1.5);
+    }
+    if (this.t <= this.combatFeatUntil[u.side]) {
+      events.push("CombatFeatBonus");
+      u.morale = Math.min(100, u.morale + 0.8);
+    }
+
+    const inCombat = recentlyHit || !!u.target;
+    if (inCombat) {
+      const visibleEnemies = this.alive().filter(
+        (e) => e.side !== u.side && !e.embarkedIn && (u.ownPerception.get(e.id) ?? "none") !== "none",
+      ).length;
+      const nearbyFriendlies = this.alive(u.side).filter((f) => !f.embarkedIn && dist(u.pos, f.pos) <= 600).length;
+      if (visibleEnemies >= 2 && visibleEnemies >= Math.max(1, nearbyFriendlies) * 2) {
+        events.push("IsolationPenalty");
+        if (u.morale > MORALE_WORRIED_MIDPOINT) {
+          u.morale = Math.max(MORALE_WORRIED_MIDPOINT, u.morale - 0.8);
+        }
+      }
+    }
+
+    if (this.t <= (this.artilleryShockUntil.get(u.id) ?? -1e9)) {
+      events.push("ArtilleryShockPenalty");
+    }
+
+    // Passive morale recovery when out of heavy pressure
+    if (!recentlyHit && u.suppression < 30 && !events.includes("IsolationPenalty")) {
+      u.morale = Math.min(100, u.morale + 0.35);
+    } else if (!recentlyHit && !events.includes("IsolationPenalty")) {
+      u.morale = Math.min(100, u.morale + 0.15);
+    }
+
+    // Sustained heavy suppression caps morale drain at SuppressionFloor (shaken midpoint)
+    if (u.suppression > 50 && u.morale > MORALE_SHAKEN_MIDPOINT) {
+      u.morale = Math.max(MORALE_SHAKEN_MIDPOINT, u.morale - 0.2);
+    }
+    u.activeMoraleEvents = events;
+  }
+
   private bot(u: Unit) {
     if (u.state === "destroyed") return;
+    if (u.embarkedIn) {
+      const tr = this.get(u.embarkedIn);
+      if (!tr || tr.state === "destroyed") this.disembark(u);
+      else u.pos = { ...tr.pos };
+    }
     if (u.garrison && !this.unitFloor(u)) u.garrison = undefined;
 
     const recentlyHit = this.t - u.lastHitAt < 15;
     u.suppression = Math.max(0, u.suppression - (recentlyHit ? 0.7 : 3));
+    this.updateMoraleAndEvents(u, recentlyHit);
 
-    if (u.state !== "broken" && (u.strength < 30 || u.morale < 20)) {
+    if (u.state !== "broken" && !u.embarkedIn && (u.strength < 30 || u.morale < 20)) {
       if (u.garrison) this.vacateBuilding(u);
       u.state = "broken";
       u.roe = "return_fire";
@@ -1280,7 +1534,7 @@ export class World {
       u.state = u.order.dest ? "moving" : "holding";
       this.emit("recovered", u, "no longer pinned, resuming orders");
     }
-    if ((u.state === "moving" || u.state === "holding") && u.order.dest) {
+    if (!u.embarkedIn && (u.state === "moving" || u.state === "holding") && u.order.dest) {
       const standoff =
         u.order.kind === "attack" &&
         this.alive().some(
@@ -1292,7 +1546,7 @@ export class World {
       u.state = standoff ? "holding" : "moving";
     }
 
-    if ((u.state === "moving" || u.state === "broken") && u.order.dest) {
+    if (!u.embarkedIn && (u.state === "moving" || u.state === "broken") && u.order.dest) {
       u.settledTicks = 0;
       this.move(u, u.order.dest);
     } else {
@@ -1312,7 +1566,8 @@ export class World {
     if (u.garrison) this.vacateBuilding(u);
     const d = dist(u.pos, dest);
     const speedMult = this.map.terrainDefAt(u.pos).speedMultiplier;
-    const kmh = STATS[u.type].baseSpeedKmH * speedMult;
+    const moraleSpeedMult = u.state === "broken" ? 1.0 : 0.65 + 0.35 * (u.morale / 100);
+    const kmh = STATS[u.type].baseSpeedKmH * speedMult * moraleSpeedMult;
     const step = (kmh / 3.6) * (u.suppression > 30 ? 0.5 : 1);
     if (step <= 0) return;
 
@@ -1325,6 +1580,7 @@ export class World {
         u.order = { kind: "hold" };
         if (u.state === "moving") u.state = "holding";
       }
+      u.stuckTicks = 0;
       return;
     }
 
@@ -1336,6 +1592,7 @@ export class World {
       }
       u.heading = Math.atan2(dest.y - u.pos.y, dest.x - u.pos.x);
       u.pos = { ...dest };
+      u.stuckTicks = 0;
       const was = u.order;
       u.order = { kind: "hold" };
       if (u.state === "moving") {
@@ -1354,8 +1611,25 @@ export class World {
       if (this.canOccupy(u, nextPos) && this.canOccupy(u, probePos)) {
         u.heading = ang;
         u.pos = nextPos;
+        u.stuckTicks = 0;
         return;
       }
+    }
+
+    // Wheeled stuck-recovery pivot-in-place fallback when forward pathing cannot advance
+    u.stuckTicks += 1;
+    if (u.mobility === "wheeled" && u.stuckTicks >= 2) {
+      for (const offset of [2.1, -2.1, 2.6, -2.6, Math.PI]) {
+        const ang = baseAngle + offset;
+        const backPos = { x: u.pos.x + Math.cos(ang) * step, y: u.pos.y + Math.sin(ang) * step };
+        if (this.canOccupy(u, backPos)) {
+          u.heading = ang;
+          u.pos = backPos;
+          u.stuckTicks = 0;
+          return;
+        }
+      }
+      u.heading = normalizeAngle(u.heading + Math.PI / 2);
     }
   }
 }

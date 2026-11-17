@@ -3,7 +3,7 @@ import { createDeepSeek } from "@ai-sdk/deepseek";
 import { AgentLog, createGame, Game } from "../game";
 import { clock } from "../perception/sitrep";
 import { COMPANY, PLAYER } from "../sim/scenario";
-import { OrderKind, Roe, STATS } from "../sim/world";
+import { getMoraleTier, isCowering, MoraleEventKind, MoraleTier, OrderKind, Roe, STATS } from "../sim/world";
 import { LosObserver, Sandtable3D } from "../render/Sandtable3D";
 import { Building, BuildingFloor, MobilityClass, UnitTrait, Vec } from "../sim/map";
 
@@ -246,16 +246,60 @@ export const App: React.FC = () => {
     );
   };
 
-  const unitRows = god || !aiCommander
+  const moraleBadge = (tier: MoraleTier, cowering: boolean) => {
+    const colors: Record<MoraleTier, { bg: string; fg: string }> = {
+      calm: { bg: "#dcfce7", fg: "#166534" },
+      worried: { bg: "#fef9c3", fg: "#854d0e" },
+      shaken: { bg: "#ffedd5", fg: "#9a3412" },
+      panicked: { bg: "#fee2e2", fg: "#991b1b" },
+    };
+    const c = colors[tier];
+    return (
+      <span style={{ background: c.bg, color: c.fg, padding: "1px 5px", borderRadius: 3, fontSize: 10, fontWeight: 700 }}>
+        {tier.toUpperCase()}{cowering ? " · COWER" : ""}
+      </span>
+    );
+  };
+
+  const unitRows: {
+    id: string;
+    type: keyof typeof STATS;
+    state: string;
+    strength: number;
+    engaging: boolean;
+    moraleTier?: MoraleTier;
+    cowering?: boolean;
+    suppression?: number;
+    moraleEvents?: MoraleEventKind[];
+  }[] = god || !aiCommander
     ? world.units
         .filter((u) => u.side === "blue")
-        .map((u) => ({ id: u.id, type: u.type, state: u.state, strength: u.strength, engaging: !!u.target }))
+        .map((u) => ({
+          id: u.id,
+          type: u.type,
+          state: u.state,
+          strength: u.strength,
+          engaging: !!u.target,
+          moraleTier: getMoraleTier(u.morale),
+          cowering: isCowering(u),
+          suppression: u.suppression,
+          moraleEvents: u.activeMoraleEvents,
+        }))
     : picture.status;
 
   const redRows = god
     ? world.units
         .filter((u) => u.side === "red")
-        .map((u) => ({ id: u.id, type: u.type, state: u.state, strength: u.strength, engaging: !!u.target }))
+        .map((u) => ({
+          id: u.id,
+          type: u.type,
+          state: u.state,
+          strength: u.strength,
+          engaging: !!u.target,
+          moraleTier: getMoraleTier(u.morale),
+          cowering: isCowering(u),
+          suppression: u.suppression,
+        }))
     : [];
 
   const selectedUnit = selectedUnitId ? world.get(selectedUnitId) : undefined;
@@ -593,9 +637,19 @@ export const App: React.FC = () => {
                   <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, color: "#524a3e", fontSize: 11 }}>
                     <span>{STATS[u.type].label}</span>
                     <span style={{ fontFamily: "ui-monospace, monospace" }}>
-                      str {Math.round(u.strength)}%{u.engaging ? " · ENGAGING" : ""}
+                      str {Math.round(u.strength)}%{u.suppression !== undefined ? ` · sup ${Math.round(u.suppression)}%` : ""}{u.engaging ? " · ENG" : ""}
                     </span>
                   </div>
+                  {u.moraleTier && (
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 3, gap: 4, flexWrap: "wrap" }}>
+                      {moraleBadge(u.moraleTier, !!u.cowering)}
+                      {u.moraleEvents && u.moraleEvents.length > 0 && (
+                        <span style={{ fontSize: 9.5, fontFamily: "ui-monospace, monospace", color: "#4b4338" }}>
+                          {u.moraleEvents.join(", ")}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -626,8 +680,11 @@ export const App: React.FC = () => {
                     </div>
                     <div style={{ display: "flex", justifyContent: "space-between", marginTop: 2, color: "#524a3e", fontSize: 10.5 }}>
                       <span>{STATS[u.type].label}</span>
-                      <span style={{ fontFamily: "ui-monospace, monospace" }}>str {Math.round(u.strength)}%</span>
+                      <span style={{ fontFamily: "ui-monospace, monospace" }}>
+                        str {Math.round(u.strength)}% · sup {Math.round(u.suppression)}%
+                      </span>
                     </div>
+                    <div style={{ marginTop: 2 }}>{moraleBadge(u.moraleTier, u.cowering)}</div>
                   </div>
                 );
               })}
@@ -757,6 +814,20 @@ export const App: React.FC = () => {
             {/* Live Selected-Unit Telemetry */}
             <div style={{ background: "rgba(235,229,215,0.6)", padding: 6, borderRadius: 4, fontSize: 10.5, fontFamily: "ui-monospace, monospace" }}>
               <div><strong>Telemetry</strong> · mob: {selectedUnit.mobility}</div>
+              <div>
+                morale: <b>{Math.round(selectedTelemetry.morale)}</b> ({selectedTelemetry.moraleTier}
+                {selectedTelemetry.cowering ? ", Cowering" : ""}) · sup: <b>{Math.round(selectedTelemetry.suppression)}%</b>
+              </div>
+              <div>
+                moraleEvents: <b>{selectedTelemetry.activeMoraleEvents.length ? selectedTelemetry.activeMoraleEvents.join(", ") : "none"}</b>
+              </div>
+              {(selectedTelemetry.embarkedIn || selectedTelemetry.embarkedIds.length > 0) && (
+                <div>
+                  {selectedTelemetry.embarkedIn
+                    ? `embarkedIn: ${selectedTelemetry.embarkedIn}`
+                    : `passengers: ${selectedTelemetry.embarkedIds.join(", ")}`}
+                </div>
+              )}
               <div>bodySig: <b>{selectedTelemetry.bodySignature.toFixed(2)}</b> · muzzle: {selectedUnit.muzzleSignature} ({selectedUnit.weaponClass})</div>
               <div>
                 ter: <b>{selectedTelemetry.terrainId}</b> (sig×{selectedTelemetry.modifiers.signatureMult ?? 1}, dmg×{selectedTelemetry.modifiers.damageMult ?? 1})
