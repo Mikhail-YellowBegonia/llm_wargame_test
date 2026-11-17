@@ -284,6 +284,28 @@ export interface SightlineResult {
   blockReason?: "terrain" | "building";
 }
 
+export interface MapAsset {
+  version: number;
+  name: string;
+  width: number;
+  depth: number;
+  fineCellSize: number;
+  originUtm?: { easting: number; northing: number; zone: number };
+  elevationDmB64: string;
+  terrainB64: string;
+  roadNetwork: RoadNetwork;
+  buildings: Building[];
+  places: Place[];
+}
+
+function decodeBase64(b64: string): Uint8Array {
+  if (typeof Buffer !== "undefined") return new Uint8Array(Buffer.from(b64, "base64"));
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
 /** Seeded PRNG (mulberry32) so maps and fights are reproducible. */
 export function rng(seed: number) {
   return () => {
@@ -374,6 +396,35 @@ export class GameMap {
       this.recomputeSlopes();
       this.syncCoarseFromFine();
     }
+  }
+
+  /** Load a precompiled static MapAsset into 10m TypedArray channels and vector layers (zero runtime network I/O). */
+  static fromAsset(asset: MapAsset): GameMap {
+    const map = new GameMap(asset.width, asset.depth, 0, { empty: true });
+    const elevBytes = decodeBase64(asset.elevationDmB64);
+    const nElev = Math.min(map.elevationGrid.length, Math.floor(elevBytes.length / 2));
+    for (let i = 0; i < nElev; i++) {
+      const raw = (elevBytes[i * 2] | (elevBytes[i * 2 + 1] << 8)) << 16 >> 16;
+      map.elevationGrid[i] = raw * 0.1;
+    }
+    const terBytes = decodeBase64(asset.terrainB64);
+    map.terrainGrid.set(terBytes.subarray(0, map.terrainGrid.length));
+    map.roadNetwork = {
+      nodes: asset.roadNetwork.nodes.map((n) => ({ ...n, pos: { ...n.pos } })),
+      edges: asset.roadNetwork.edges.map((e) => ({ ...e, points: e.points.map((p) => ({ ...p })) })),
+    };
+    map.places = asset.places.map((p) => ({ ...p, pos: { ...p.pos } }));
+    for (const b of asset.buildings) {
+      map.addBuilding({
+        ...b,
+        footprint: b.footprint.map((v) => ({ ...v })),
+        center: { ...b.center },
+        floors: b.floors.map((f) => ({ ...f, occupants: [...f.occupants], modifiers: { ...f.modifiers } })),
+      });
+    }
+    map.recomputeSlopes();
+    map.syncCoarseFromFine();
+    return map;
   }
 
   idx(p: Vec) {
