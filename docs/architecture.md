@@ -23,7 +23,7 @@ Simulation World (src/sim/)
 
 | Path | Responsibility | Dependencies |
 | :--- | :--- | :--- |
-| `src/sim/map.ts` | 50m grid height/terrain (`open`, `forest`, `town`, `road`), 4/6-digit grid refs, named places/markers, raycast LOS. | `simplex-noise` |
+| `src/sim/map.ts` | 10m multi-channel geo-substrate (`elevationGrid`, `slopeGrid`, `terrainGrid`, `buildingIdGrid`), 6D `TERRAIN_DEFS` registry (11 terrain IDs), `RoadNetwork`, multi-story `Building`/`BuildingFloor` (`canGarrisonFloor`, `gutBuildingFloor`), 3D Beer-Lambert `sightline()` engine, and legacy 50m compatibility views. | `simplex-noise` |
 | `src/sim/world.ts` | Platoon entities (`tank`, `ifv`, `infantry`, `atgm`), spotting, firepower/cover/suppression combat model, platoon FSM (`holding`, `moving`, `pinned`, `broken`, `destroyed`; `attack` orders halt at 75% standoff range when target is in LOS), event bus. | `src/sim/map.ts` |
 | `src/sim/scenario.ts` | "Operation Kessel" map authoring, initial OOB, scripted red reserve trigger, win/loss check. | `src/sim/*` |
 | `src/comms/radio.ts` | `RadioNet`: single-channel airtime queue (`1 + words/8` sec), delivery callbacks, optional structured payload (`data`). | None |
