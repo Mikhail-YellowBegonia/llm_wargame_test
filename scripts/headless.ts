@@ -547,6 +547,34 @@ function verifyPhase2C() {
 verifyPhase2C();
 console.log("Phase 2C morale, SuppressionFloor, Cowering, morale events & vehicle patches passed.");
 
+function verifyPhase2D() {
+  const vfxMap = new GameMap(2000, 1000, 1, { empty: true });
+  const vfxWorld = new World(vfxMap, 25);
+  const mover = vfxWorld.add({ id: "GlideTank", side: "blue", type: "tank", pos: { x: 300, y: 500 }, heading: Math.PI / 2 });
+  const target = vfxWorld.add({ id: "TargetTank", side: "red", type: "tank", pos: { x: 800, y: 500 }, heading: Math.PI, roe: "hold_fire" });
+
+  vfxWorld.command(mover, { kind: "move", dest: { x: 400, y: 500 } });
+  vfxWorld.step();
+  assert.equal(mover.prevPos.x, 300, "prevPos must capture start-of-tick position");
+  assert.equal(mover.prevHeading, Math.PI / 2, "prevHeading must capture start-of-tick heading");
+  assert.ok(mover.pos.x > 300, "pos must advance during step()");
+  assert.ok(Math.abs(mover.heading) < 0.01, "heading must rotate toward destination");
+  assert.ok(vfxWorld.shotEvents.length > 0, "fire() must append CombatShotEvent entries");
+  const ev = vfxWorld.shotEvents[0];
+  assert.equal(ev.shooterId, "GlideTank");
+  assert.equal(ev.targetId, "TargetTank");
+  assert.ok(ev.fromZ >= 0 && ev.toZ >= 0);
+
+  vfxWorld.applyHeArtilleryBlast({ x: 800, y: 500 }, 8, 5, 30, 40);
+  const artEv = vfxWorld.shotEvents[vfxWorld.shotEvents.length - 1];
+  assert.equal(artEv.ammo, "HE");
+  assert.equal(artEv.blastRadius, 5);
+  assert.ok(target.state !== "destroyed");
+}
+
+verifyPhase2D();
+console.log("Phase 2D interpolation snapshots & CombatShotEvent checks passed.");
+
 const objective = map.resolve("Geisa")!;
 for (const u of world.alive("blue")) world.command(u, { kind: "attack", dest: objective, destName: "Geisa" });
 

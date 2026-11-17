@@ -403,7 +403,9 @@ export interface Unit {
   side: Side;
   type: UnitType;
   pos: Vec;
+  prevPos: Vec;
   heading: number; // radians (0 = East, Math.PI/2 = North)
+  prevHeading: number;
   strength: number;
   suppression: number;
   morale: number;
@@ -433,6 +435,25 @@ export interface Unit {
   weapons: WeaponSlot[];
   mutexCooldowns: Map<string, number>;
   subRoster?: InfantrySubRoster;
+}
+
+export interface CombatShotEvent {
+  id: number;
+  t: number;
+  shooterId: string;
+  targetId?: string;
+  from: Vec;
+  fromZ: number;
+  to: Vec;
+  toZ: number;
+  ammo: AmmoType;
+  weaponClass: WeaponSignatureClass;
+  hit: boolean;
+  penetrated: boolean;
+  hitAspect?: ArmorAspect;
+  damageDealt: number;
+  blastRadius?: number;
+  guttedFloor?: number;
 }
 
 export interface SupplyNode {
@@ -615,6 +636,7 @@ export class World {
   units: Unit[] = [];
   contacts: Record<Side, Map<string, Contact>> = { blue: new Map(), red: new Map() };
   events: SimEvent[] = [];
+  shotEvents: CombatShotEvent[] = [];
   supplyNodes: SupplyNode[] = [];
   private listeners: ((e: SimEvent) => void)[] = [];
   private random: () => number;
@@ -622,8 +644,14 @@ export class World {
   private underFireReported = new Map<string, number>();
   private combatFeatUntil: Record<Side, number> = { blue: -1e9, red: -1e9 };
   private artilleryShockUntil = new Map<string, number>();
+  private shotSeq = 0;
 
   constructor(readonly map: GameMap, seed = 1) { this.random = rng(seed); }
+
+  private pushShotEvent(ev: Omit<CombatShotEvent, "id">) {
+    this.shotEvents.push({ id: ++this.shotSeq, ...ev });
+    if (this.shotEvents.length > 256) this.shotEvents.splice(0, this.shotEvents.length - 256);
+  }
 
   addSupplyNode(node: SupplyNode) { this.supplyNodes.push(node); }
 
@@ -637,15 +665,18 @@ export class World {
   add(
     u: Omit<
       Unit,
-      | "heading" | "strength" | "suppression" | "morale" | "state" | "lastFiredAt" | "lastHitAt" | "roe" | "order"
+      | "prevPos" | "heading" | "prevHeading" | "strength" | "suppression" | "morale" | "state" | "lastFiredAt" | "lastHitAt" | "roe" | "order"
       | "mobility" | "traits" | "headcount" | "eyeHeight" | "baseSignature" | "weaponClass" | "muzzleSignature"
       | "settledTicks" | "stuckTicks" | "embarkedIds" | "activeMoraleEvents"
       | "ownPerception" | "armor" | "weapons" | "mutexCooldowns"
     > & Partial<Unit>,
   ) {
     const st = STATS[u.type];
+    const heading = u.heading ?? (u.side === "blue" ? 0 : Math.PI);
     const unit: Unit = {
-      heading: u.side === "blue" ? 0 : Math.PI,
+      prevPos: { ...u.pos },
+      heading,
+      prevHeading: heading,
       strength: 100,
       suppression: 0,
       morale: 80,
@@ -978,6 +1009,10 @@ export class World {
 
   step() {
     this.t += 1;
+    for (const u of this.units) {
+      u.prevPos = { ...u.pos };
+      u.prevHeading = u.heading;
+    }
     const live = this.alive();
     this.spot(live);
     for (const u of live) this.tickCooldowns(u);
@@ -1189,10 +1224,16 @@ export class World {
     return chosen;
   }
 
-  private evaluateArmorPenetration(slot: Pick<WeaponSlot, "ammo" | "pen" | "d0" | "range">, attacker: Unit, target: Unit, d: number, hit: boolean): boolean {
+  private evaluateArmorPenetration(
+    slot: Pick<WeaponSlot, "ammo" | "pen" | "d0" | "range">,
+    attacker: Unit,
+    target: Unit,
+    d: number,
+    hit: boolean,
+  ): { penetrated: boolean; hitAspect?: ArmorAspect; blastPos: Vec } {
     if (slot.ammo === "HE") {
       const blastPos = hit
-        ? target.pos
+        ? { ...target.pos }
         : { x: target.pos.x + (this.random() - 0.5) * 6, y: target.pos.y + (this.random() - 0.5) * 6 };
       const res = evaluateHePenetration(
         target.armor,
@@ -1204,14 +1245,14 @@ export class World {
         slot.d0 ?? 3,
         target.traits.includes("armored"),
       );
-      return res.penetrated;
+      return { penetrated: res.penetrated, hitAspect: res.bestZone, blastPos };
     }
-    if (!hit) return false;
+    if (!hit) return { penetrated: false, blastPos: { ...target.pos } };
     const aspect = resolveImpactAspect(target.pos, target.heading, attacker.pos);
     if (slot.ammo === "AP") {
-      return computeApPenetration(slot.pen, d, slot.range) >= target.armor[aspect].ke;
+      return { penetrated: computeApPenetration(slot.pen, d, slot.range) >= target.armor[aspect].ke, hitAspect: aspect, blastPos: { ...target.pos } };
     }
-    return slot.pen >= target.armor[aspect].ce;
+    return { penetrated: slot.pen >= target.armor[aspect].ce, hitAspect: aspect, blastPos: { ...target.pos } };
   }
 
   private evaluateBuildingArmorPenetration(slot: Pick<WeaponSlot, "ammo" | "pen" | "range">, buildingArmor: ArmorValue, d: number): boolean {
@@ -1303,11 +1344,13 @@ export class World {
     }
 
     const targetMods = this.unitModifiers(target);
+    const fromZ = this.map.elevationAt(u.pos) + this.unitEyeHeight(u);
+    const targetH = target.garrison ? this.unitEyeHeight(target) : target.traits.includes("armored") ? 1.4 : 0.8;
     for (const s of shots) {
       if (target.state === "destroyed") break;
       const hitChance = this.computeSlotHitChance(u, s.slot, target, d, s.efficiency);
       const hit = this.random() <= hitChance;
-      const penetrated = this.evaluateArmorPenetration(s.slot, u, target, d, hit);
+      const { penetrated, hitAspect, blastPos } = this.evaluateArmorPenetration(s.slot, u, target, d, hit);
 
       let dmg = 0;
       let supp = 0;
@@ -1321,6 +1364,7 @@ export class World {
         supp = s.slot.suppression * 0.15 * (targetMods.suppressionMult ?? 1);
       }
 
+      let guttedFloor: number | undefined;
       if (hit && target.garrison) {
         const bld = this.map.buildings.find((b) => b.id === target.garrison!.buildingId);
         const floor = bld?.floors.find((f) => f.level === target.garrison!.floorLevel);
@@ -1331,6 +1375,7 @@ export class World {
             if (floor.integrity <= 0) {
               const gut = this.map.gutBuildingFloor(bld.id, floor.level);
               if (gut) {
+                guttedFloor = gut.level;
                 for (const occId of gut.evictedOccupants) {
                   const occ = this.get(occId);
                   if (occ && occ.state !== "destroyed") {
@@ -1343,6 +1388,24 @@ export class World {
           }
         }
       }
+
+      this.pushShotEvent({
+        t: this.t,
+        shooterId: u.id,
+        targetId: target.id,
+        from: { ...u.pos },
+        fromZ,
+        to: blastPos,
+        toZ: this.map.elevationAt(blastPos) + targetH,
+        ammo: s.slot.ammo,
+        weaponClass: s.slot.weaponClass,
+        hit,
+        penetrated,
+        hitAspect,
+        damageDealt: dmg,
+        blastRadius: s.slot.ammo === "HE" ? (s.slot.d0 ?? 3) : undefined,
+        guttedFloor,
+      });
 
       this.hit(target, dmg, supp, u);
     }
@@ -1366,6 +1429,8 @@ export class World {
     by?: Unit,
   ) {
     const maxRadius = Math.max(20, d0 * 6);
+    let totalDmg = 0;
+    let anyPen = false;
     for (const u of this.alive()) {
       if (u.embarkedIn) continue;
       const d = dist(u.pos, blastPos);
@@ -1378,6 +1443,8 @@ export class World {
         const supp = yieldSuppression * falloff;
         const shock = yieldDamage * falloff * 1.4;
         const hp = yieldDamage * falloff * 0.5;
+        totalDmg += hp;
+        anyPen = true;
         this.artilleryShockUntil.set(u.id, this.t + ARTILLERY_SHOCK_WINDOW);
         if (!u.activeMoraleEvents.includes("ArtilleryShockPenalty")) {
           u.activeMoraleEvents.push("ArtilleryShockPenalty");
@@ -1394,11 +1461,28 @@ export class World {
           d0,
           u.traits.includes("armored"),
         );
+        if (penRes.penetrated) anyPen = true;
         const dmg = penRes.penetrated ? yieldDamage * falloff * (mods.damageMult ?? 1) : 0;
         const supp = yieldSuppression * falloff * (mods.suppressionMult ?? 1);
+        totalDmg += dmg;
         this.hit(u, dmg, supp, by);
       }
     }
+    const groundZ = this.map.elevationAt(blastPos);
+    this.pushShotEvent({
+      t: this.t,
+      shooterId: by?.id ?? "Artillery",
+      from: { x: blastPos.x - 40, y: blastPos.y },
+      fromZ: groundZ + 120 + blastHeightOffset,
+      to: { ...blastPos },
+      toZ: groundZ + blastHeightOffset,
+      ammo: "HE",
+      weaponClass: "heavy_weapon",
+      hit: true,
+      penetrated: anyPen,
+      damageDealt: totalDmg,
+      blastRadius: d0,
+    });
   }
 
   private hit(u: Unit, dmg: number, supp: number, by?: Unit, opts?: { unboundedMoraleDrain?: number }) {
