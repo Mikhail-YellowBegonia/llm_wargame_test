@@ -3,7 +3,14 @@
 import assert from "node:assert/strict";
 import { GameMap, TERRAIN_DEFS, TERRAIN_IDS } from "../src/sim/map";
 import { buildScenario } from "../src/sim/scenario";
-import { World, evaluateHePenetration } from "../src/sim/world";
+import {
+  MORALE_SHAKEN_MIDPOINT,
+  MORALE_WORRIED_MIDPOINT,
+  World,
+  evaluateHePenetration,
+  getMoraleTier,
+  isCowering,
+} from "../src/sim/world";
 import { asciiMap } from "../src/render/ascii";
 
 function verifyPhase1A() {
@@ -412,6 +419,133 @@ function verifyPhase2B() {
 
 verifyPhase2B();
 console.log("Phase 2B accuracy, armor, HE inverse-square & infantry takeover checks passed.");
+
+function verifyPhase2C() {
+  // 1. SuppressionFloor & Cowering: sustained 0-damage non-penetrating fire stops at shaken midpoint (37.5)
+  const morMap = new GameMap(2000, 1000, 1, { empty: true });
+  morMap.paint({ x: 500, y: 800 }, 50, "dense_forest");
+  const morWorld = new World(morMap, 20);
+  const supIfv = morWorld.add({
+    id: "SupIFV",
+    side: "blue",
+    type: "ifv",
+    pos: { x: 400, y: 500 },
+    weapons: [
+      {
+        id: "30mm_ap",
+        name: "30mm AP",
+        ammo: "AP",
+        pen: 5,
+        damage: 10,
+        suppression: 18,
+        range: 1500,
+        reloadSec: 1,
+        cooldown: 0,
+        accuracy: 1.0,
+        weaponClass: "light_weapon",
+        muzzleSignature: 1.35,
+      },
+    ],
+  });
+  const calmTank = morWorld.add({
+    id: "CalmTank",
+    side: "red",
+    type: "tank",
+    pos: { x: 900, y: 500 },
+    heading: Math.PI,
+    roe: "hold_fire",
+    morale: 85,
+  });
+  const baseSig = morWorld.computeBodySignature(calmTank);
+  const baseOptics = morWorld.effectiveSpotRange(calmTank);
+  const baseDmgMult = morWorld.unitModifiers(calmTank).damageMult ?? 1;
+
+  for (let i = 0; i < 40; i++) morWorld.step();
+  assert.equal(calmTank.strength, 100, "Non-penetrating hits must deal 0 HP damage");
+  assert.ok(
+    calmTank.morale >= MORALE_SHAKEN_MIDPOINT - 1e-6,
+    `SuppressionFloor must prevent 0-dmg suppression from dropping morale below ${MORALE_SHAKEN_MIDPOINT} (got ${calmTank.morale})`,
+  );
+  assert.equal(getMoraleTier(calmTank.morale), "shaken");
+  assert.equal(isCowering(calmTank), true, "Entering shaken must trigger Cowering");
+  assert.ok(morWorld.computeBodySignature(calmTank) < baseSig, "Cowering must lower bodySignature");
+  assert.ok(morWorld.effectiveSpotRange(calmTank) < baseOptics, "Cowering must lower optics range");
+  assert.ok((morWorld.unitModifiers(calmTank).damageMult ?? 1) < baseDmgMult, "Cowering must strengthen cover damageMult");
+  assert.ok(!supIfv.activeMoraleEvents.includes("CombatFeatBonus"), "0-dmg non-penetrating hits must not trigger CombatFeatBonus");
+
+  // Cover-linked suppression resistance check
+  const openInf = morWorld.add({ id: "OpenInf", side: "blue", type: "infantry", pos: { x: 200, y: 200 }, roe: "hold_fire" });
+  const forestInf = morWorld.add({ id: "ForestInf", side: "blue", type: "infantry", pos: { x: 500, y: 800 }, roe: "hold_fire" });
+  assert.ok(
+    morWorld.computeSuppressionResistance(forestInf) < morWorld.computeSuppressionResistance(openInf),
+    "Hard cover must increase suppression resistance",
+  );
+
+  // 2. IsolationPenalty (halts at worried midpoint 62.5) vs ArtilleryShockPenalty (unbounded to panicked) + SupplyBonus
+  const evtMap = new GameMap(2000, 1000, 1, { empty: true });
+  const evtWorld = new World(evtMap, 21);
+  const loneUnit = evtWorld.add({ id: "Lone", side: "blue", type: "infantry", pos: { x: 500, y: 500 }, morale: 85, roe: "hold_fire" });
+  evtWorld.add({ id: "RedA", side: "red", type: "tank", pos: { x: 800, y: 500 }, roe: "hold_fire" });
+  evtWorld.add({ id: "RedB", side: "red", type: "tank", pos: { x: 800, y: 550 }, roe: "hold_fire" });
+  evtWorld.add({ id: "RedC", side: "red", type: "tank", pos: { x: 800, y: 450 }, roe: "hold_fire" });
+
+  // Simulate active combat while outnumbered 3:1
+  for (let i = 0; i < 45; i++) {
+    loneUnit.lastHitAt = evtWorld.t; // keep combat active without taking HP damage
+    evtWorld.step();
+  }
+  assert.ok(loneUnit.activeMoraleEvents.includes("IsolationPenalty"), "3:1 outnumbered unit in combat must incur IsolationPenalty");
+  assert.ok(
+    Math.abs(loneUnit.morale - MORALE_WORRIED_MIDPOINT) < 1.0,
+    `IsolationPenalty must halt at worried midpoint (${MORALE_WORRIED_MIDPOINT}, got ${loneUnit.morale})`,
+  );
+
+  // Open-terrain unarmored infantry hit by HE artillery breaks to panicked via ArtilleryShockPenalty
+  evtWorld.applyHeArtilleryBlast({ x: 505, y: 500 }, 8, 8, 50, 60, 0);
+  assert.ok(loneUnit.activeMoraleEvents.includes("ArtilleryShockPenalty"), "Open-terrain HE must trigger ArtilleryShockPenalty");
+  assert.equal(getMoraleTier(loneUnit.morale), "panicked", "Unbounded ArtilleryShockPenalty must break morale to panicked");
+
+  // SupplyBonus accelerates morale recovery
+  evtWorld.addSupplyNode({ id: "FOB_1", side: "blue", pos: { x: 500, y: 500 }, radius: 150 });
+  const beforeSupply = loneUnit.morale;
+  loneUnit.lastHitAt = -100;
+  evtWorld.step();
+  assert.ok(loneUnit.activeMoraleEvents.includes("SupplyBonus"));
+  assert.ok(loneUnit.morale > beforeSupply + 1.0, "SupplyBonus must accelerate morale recovery");
+
+  // 3. Vehicle minor patches: embarked firing ports, proportional damage/suppression transfer, wheeled stuck pivot
+  const vehMap = new GameMap(1000, 1000, 1, { empty: true });
+  vehMap.paint({ x: 400, y: 800 }, 60, "deep_water");
+  const vehWorld = new World(vehMap, 22);
+  const apc = vehWorld.add({ id: "APC", side: "blue", type: "ifv", pos: { x: 300, y: 300 }, roe: "hold_fire" });
+  const embarked = vehWorld.add({ id: "PaxInf", side: "blue", type: "infantry", pos: { x: 250, y: 300 }, roe: "fire_at_will" });
+  assert.equal(vehWorld.embark(embarked, apc), "ok");
+  assert.deepEqual(apc.embarkedIds, ["PaxInf"]);
+
+  const closeTarget = vehWorld.add({ id: "CloseRed", side: "red", type: "infantry", pos: { x: 500, y: 300 }, roe: "hold_fire" });
+  const apcHunter = vehWorld.add({
+    id: "Hunter",
+    side: "red",
+    type: "atgm",
+    pos: { x: 700, y: 300 },
+    roe: "fire_at_will",
+  });
+  const startPaxStr = embarked.strength;
+  for (let i = 0; i < 12; i++) vehWorld.step();
+  assert.ok(closeTarget.strength < 100 || closeTarget.suppression > 0, "Embarked infantry must fire through IFV firing ports within 300m");
+  assert.ok(embarked.strength < startPaxStr && embarked.suppression > 0, "Transport hits must transfer proportional damage & suppression to embarked passengers");
+  assert.ok(apcHunter.state !== "destroyed");
+
+  // Wheeled stuck-recovery pivot fallback when pathing is blocked by deep_water
+  const wheelCar = vehWorld.add({ id: "ReconCar", side: "blue", type: "ifv", mobility: "wheeled", pos: { x: 330, y: 800 }, heading: 0, roe: "hold_fire" });
+  vehWorld.command(wheelCar, { kind: "move", dest: { x: 500, y: 800 } });
+  const h0 = wheelCar.heading;
+  for (let i = 0; i < 5; i++) vehWorld.step();
+  assert.notEqual(wheelCar.heading, h0, "Wedged wheeled vehicle must trigger stuck-recovery pivot fallback");
+}
+
+verifyPhase2C();
+console.log("Phase 2C morale, SuppressionFloor, Cowering, morale events & vehicle patches passed.");
 
 const objective = map.resolve("Geisa")!;
 for (const u of world.alive("blue")) world.command(u, { kind: "attack", dest: objective, destName: "Geisa" });
