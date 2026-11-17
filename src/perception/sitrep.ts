@@ -32,6 +32,9 @@ function orderWord(world: World, u: Unit) {
   if (o.kind === "fire_mission") {
     return `fire mission (${u.fireMission?.effectiveAmmo ?? o.ammoType ?? "HE_Impact"}) at ${o.destName ? o.destName + " " : ""}grid ${world.map.toGrid(o.dest)}`;
   }
+  if (o.kind === "withdraw_off_map") {
+    return `withdraw off-map to ${o.destName ?? "map edge"}`;
+  }
   return `${o.kind} to ${o.destName ? o.destName + " " : ""}grid ${world.map.toGrid(o.dest)}`;
 }
 
@@ -41,6 +44,10 @@ export function companySitrep(world: World, commander: string, pendingOrders?: R
   const lines = [`SITUATION at ${clock(world.t)}`, "Own platoons:"];
   for (const u of own) {
     if (u.state === "destroyed") { lines.push(`- ${u.id} (${STATS[u.type].label}): DESTROYED / no contact`); continue; }
+    if (u.offMapReconstituteAt !== undefined) {
+      lines.push(`- ${u.id} (${STATS[u.type].label}): off-map reconstituting (returns in ${Math.max(0, u.offMapReconstituteAt - world.t)}s)`);
+      continue;
+    }
     const supp = u.suppression >= 15 ? `, suppressed ${Math.round(u.suppression)}%` : "";
     const inFlight = pendingOrders?.get(u.id);
     const transit = inFlight ? ` (order in transit: ${inFlight})` : "";

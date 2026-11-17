@@ -5,10 +5,10 @@ import { ArmorValue, CombatModifiers, DEFAULT_BUILDING_ARMOR, DynamicOcclusionVo
 
 export type { ArmorValue };
 export type Side = "blue" | "red";
-export type UnitType = "tank" | "ifv" | "infantry" | "atgm" | "artillery" | "mlrs" | "recon";
+export type UnitType = "tank" | "ifv" | "infantry" | "atgm" | "artillery" | "mlrs" | "recon" | "fob" | "supply_truck";
 export type ArtilleryAmmoType = "HE_Impact" | "HE_Airburst" | "Smoke" | "Direct_Self_Defense";
 export type Roe = "fire_at_will" | "return_fire" | "hold_fire";
-export type OrderKind = "hold" | "move" | "attack" | "withdraw" | "fire_mission";
+export type OrderKind = "hold" | "move" | "attack" | "withdraw" | "fire_mission" | "withdraw_off_map";
 export interface UnitGarrison {
   buildingId: string;
   floorLevel: number;
@@ -82,6 +82,8 @@ export interface WeaponSlot {
   range: number;
   reloadSec: number;
   cooldown: number;
+  maxAmmo: number;
+  ammoRemaining: number;
   accuracy: number;        // baseline hit chance at Visual (100%)
   weaponClass: WeaponSignatureClass;
   muzzleSignature: number;
@@ -96,12 +98,19 @@ export interface InfantryWeaponSlot {
   requiredRole?: SpecialistRole;
   abandonPriority: number; // Lower value = retained longer (AT=1, MG=2, Rifle=99)
   unskilledPenalty: number; // Multiplier (<1) applied when cross-manned
-  weapon: Omit<WeaponSlot, "cooldown">;
+  weapon: Omit<WeaponSlot, "cooldown" | "ammoRemaining" | "maxAmmo">;
   cooldown: number;
+  maxAmmo: number;
+  ammoRemaining: number;
 }
 
 export interface InfantrySubRoster {
   personnel: Record<SpecialistRole, number>;
+  wia: Record<SpecialistRole, number>;
+  kia: Record<SpecialistRole, number>;
+  selfRecoveryCap: number;
+  selfAidProgress: number;
+  fieldAidProgress: number;
   weapons: InfantryWeaponSlot[];
   abandonedWeapons: string[];
 }
@@ -127,6 +136,7 @@ interface IndirectProfile {
   supportsCalibration: boolean;
   supportsAirburst: boolean;
   supportsSmoke: boolean;
+  maxIndirectAmmo: number;
 }
 
 interface TypeStats {
@@ -143,11 +153,14 @@ interface TypeStats {
   range: number;
   spot: number;
   baseSpeedKmH: number;
+  reinforceCost: number;
+  supplyRadius?: number;
+  supplyCapacity?: number;
   passengerCapacity?: number;
   hasFiringPorts?: boolean;
   indirect?: IndirectProfile;
   armor: ArmorProfile;
-  weapons: ReadonlyArray<Omit<WeaponSlot, "cooldown">>;
+  weapons: ReadonlyArray<Omit<WeaponSlot, "cooldown" | "ammoRemaining">>;
 }
 
 const SOFT_ARMOR: ArmorProfile = {
@@ -172,6 +185,7 @@ export const STATS: Record<UnitType, TypeStats> = {
     range: 2000,
     spot: 2000,
     baseSpeedKmH: 30,
+    reinforceCost: 140,
     armor: {
       front: { ke: 16, ce: 20 },
       side: { ke: 7, ce: 9 },
@@ -188,6 +202,7 @@ export const STATS: Record<UnitType, TypeStats> = {
         suppression: 16,
         range: 2000,
         reloadSec: 6,
+        maxAmmo: 24,
         accuracy: 0.78,
         weaponClass: "heavy_weapon",
         muzzleSignature: 1.6,
@@ -204,6 +219,7 @@ export const STATS: Record<UnitType, TypeStats> = {
         suppression: 26,
         range: 2000,
         reloadSec: 6,
+        maxAmmo: 16,
         accuracy: 0.75,
         weaponClass: "heavy_weapon",
         muzzleSignature: 1.6,
@@ -219,6 +235,7 @@ export const STATS: Record<UnitType, TypeStats> = {
         suppression: 8,
         range: 800,
         reloadSec: 1,
+        maxAmmo: 120,
         accuracy: 0.65,
         weaponClass: "small_arms",
         muzzleSignature: 0.9,
@@ -239,6 +256,7 @@ export const STATS: Record<UnitType, TypeStats> = {
     range: 1800,
     spot: 2000,
     baseSpeedKmH: 30,
+    reinforceCost: 90,
     passengerCapacity: 1,
     hasFiringPorts: true,
     armor: {
@@ -257,6 +275,7 @@ export const STATS: Record<UnitType, TypeStats> = {
         suppression: 14,
         range: 1800,
         reloadSec: 10,
+        maxAmmo: 6,
         accuracy: 0.72,
         weaponClass: "heavy_weapon",
         muzzleSignature: 1.5,
@@ -272,6 +291,7 @@ export const STATS: Record<UnitType, TypeStats> = {
         suppression: 12,
         range: 1500,
         reloadSec: 2,
+        maxAmmo: 45,
         accuracy: 0.7,
         weaponClass: "light_weapon",
         muzzleSignature: 1.35,
@@ -287,6 +307,7 @@ export const STATS: Record<UnitType, TypeStats> = {
         suppression: 7,
         range: 600,
         reloadSec: 1,
+        maxAmmo: 100,
         accuracy: 0.65,
         weaponClass: "small_arms",
         muzzleSignature: 0.9,
@@ -307,6 +328,7 @@ export const STATS: Record<UnitType, TypeStats> = {
     range: 600,
     spot: 1200,
     baseSpeedKmH: 4,
+    reinforceCost: 60,
     armor: SOFT_ARMOR,
     weapons: [],
   },
@@ -324,6 +346,7 @@ export const STATS: Record<UnitType, TypeStats> = {
     range: 2500,
     spot: 2500,
     baseSpeedKmH: 4,
+    reinforceCost: 50,
     armor: SOFT_ARMOR,
     weapons: [],
   },
@@ -341,6 +364,7 @@ export const STATS: Record<UnitType, TypeStats> = {
     range: 800,
     spot: 1500,
     baseSpeedKmH: 26,
+    reinforceCost: 130,
     indirect: {
       minRange: 250,
       maxRange: 5000,
@@ -355,6 +379,7 @@ export const STATS: Record<UnitType, TypeStats> = {
       supportsCalibration: true,
       supportsAirburst: true,
       supportsSmoke: true,
+      maxIndirectAmmo: 24,
     },
     armor: {
       front: { ke: 3, ce: 4 },
@@ -372,6 +397,7 @@ export const STATS: Record<UnitType, TypeStats> = {
         suppression: 18,
         range: 800,
         reloadSec: 8,
+        maxAmmo: 6,
         accuracy: 0.58,
         weaponClass: "heavy_weapon",
         muzzleSignature: 1.8,
@@ -387,6 +413,7 @@ export const STATS: Record<UnitType, TypeStats> = {
         suppression: 7,
         range: 550,
         reloadSec: 1,
+        maxAmmo: 50,
         accuracy: 0.6,
         weaponClass: "small_arms",
         muzzleSignature: 0.9,
@@ -407,6 +434,7 @@ export const STATS: Record<UnitType, TypeStats> = {
     range: 500,
     spot: 1400,
     baseSpeedKmH: 24,
+    reinforceCost: 150,
     indirect: {
       minRange: 400,
       maxRange: 6000,
@@ -421,6 +449,7 @@ export const STATS: Record<UnitType, TypeStats> = {
       supportsCalibration: false,
       supportsAirburst: false,
       supportsSmoke: true,
+      maxIndirectAmmo: 12,
     },
     armor: {
       front: { ke: 2, ce: 3 },
@@ -438,6 +467,7 @@ export const STATS: Record<UnitType, TypeStats> = {
         suppression: 6,
         range: 500,
         reloadSec: 1,
+        maxAmmo: 40,
         accuracy: 0.55,
         weaponClass: "small_arms",
         muzzleSignature: 0.85,
@@ -458,6 +488,7 @@ export const STATS: Record<UnitType, TypeStats> = {
     range: 1000,
     spot: 2800,
     baseSpeedKmH: 42,
+    reinforceCost: 70,
     armor: {
       front: { ke: 3, ce: 4 },
       side: { ke: 2, ce: 2 },
@@ -474,6 +505,7 @@ export const STATS: Record<UnitType, TypeStats> = {
         suppression: 10,
         range: 1000,
         reloadSec: 2,
+        maxAmmo: 30,
         accuracy: 0.7,
         weaponClass: "light_weapon",
         muzzleSignature: 1.15,
@@ -487,13 +519,63 @@ export const STATS: Record<UnitType, TypeStats> = {
         suppression: 7,
         range: 600,
         reloadSec: 1,
+        maxAmmo: 60,
         accuracy: 0.65,
         weaponClass: "small_arms",
         muzzleSignature: 0.9,
       },
     ],
   },
+  fob: {
+    label: "forward operating base",
+    armored: false,
+    hasObserver: false,
+    mobility: "foot",
+    traits: ["tall_profile"],
+    headcount: 0,
+    eyeHeight: 3.5,
+    baseSignature: 1.4,
+    weaponClass: "small_arms",
+    muzzleSignature: 0.5,
+    range: 0,
+    spot: 1000,
+    baseSpeedKmH: 0,
+    reinforceCost: 200,
+    supplyRadius: 220,
+    supplyCapacity: Infinity,
+    armor: {
+      front: { ke: 5, ce: 6 },
+      side: { ke: 5, ce: 6 },
+      rear: { ke: 5, ce: 6 },
+      top: { ke: 4, ce: 5 },
+    },
+    weapons: [],
+  },
+  supply_truck: {
+    label: "supply truck",
+    armored: false,
+    hasObserver: false,
+    mobility: "wheeled",
+    traits: ["vehicle", "tall_profile"],
+    headcount: 0,
+    eyeHeight: 2.4,
+    baseSignature: 0.9,
+    weaponClass: "small_arms",
+    muzzleSignature: 0.5,
+    range: 0,
+    spot: 1100,
+    baseSpeedKmH: 36,
+    reinforceCost: 40,
+    supplyRadius: 150,
+    supplyCapacity: 100,
+    armor: SOFT_ARMOR,
+    weapons: [],
+  },
 };
+
+function emptyRoles(): Record<SpecialistRole, number> {
+  return { rifleman: 0, mg_specialist: 0, at_specialist: 0, marksman: 0, engineer: 0 };
+}
 
 function createDefaultSubRoster(type: UnitType): InfantrySubRoster | undefined {
   if (type === "infantry") {
@@ -505,6 +587,8 @@ function createDefaultSubRoster(type: UnitType): InfantrySubRoster | undefined {
         abandonPriority: 1,
         unskilledPenalty: 0.55,
         cooldown: 0,
+        maxAmmo: 4,
+        ammoRemaining: 4,
         weapon: {
           id: "at_launcher",
           name: "AT Launcher",
@@ -526,6 +610,8 @@ function createDefaultSubRoster(type: UnitType): InfantrySubRoster | undefined {
         abandonPriority: 2,
         unskilledPenalty: 0.7,
         cooldown: 0,
+        maxAmmo: 40,
+        ammoRemaining: 40,
         weapon: {
           id: "lmg",
           name: "Light MG",
@@ -550,6 +636,8 @@ function createDefaultSubRoster(type: UnitType): InfantrySubRoster | undefined {
         abandonPriority: 99,
         unskilledPenalty: 1.0,
         cooldown: 0,
+        maxAmmo: 30,
+        ammoRemaining: 30,
         weapon: {
           id: `rifle_${i}`,
           name: "Assault Rifle",
@@ -567,6 +655,11 @@ function createDefaultSubRoster(type: UnitType): InfantrySubRoster | undefined {
     }
     return {
       personnel: { rifleman: 6, mg_specialist: 1, at_specialist: 1, marksman: 0, engineer: 0 },
+      wia: emptyRoles(),
+      kia: emptyRoles(),
+      selfRecoveryCap: 6,
+      selfAidProgress: 0,
+      fieldAidProgress: 0,
       weapons,
       abandonedWeapons: [],
     };
@@ -580,6 +673,8 @@ function createDefaultSubRoster(type: UnitType): InfantrySubRoster | undefined {
         abandonPriority: 1,
         unskilledPenalty: 0.55,
         cooldown: 0,
+        maxAmmo: 6,
+        ammoRemaining: 6,
         weapon: {
           id: "atgm_launcher",
           name: "ATGM Launcher",
@@ -603,6 +698,8 @@ function createDefaultSubRoster(type: UnitType): InfantrySubRoster | undefined {
         abandonPriority: 99,
         unskilledPenalty: 1.0,
         cooldown: 0,
+        maxAmmo: 30,
+        ammoRemaining: 30,
         weapon: {
           id: `carbine_${i}`,
           name: "Carbine",
@@ -620,6 +717,11 @@ function createDefaultSubRoster(type: UnitType): InfantrySubRoster | undefined {
     }
     return {
       personnel: { rifleman: 2, mg_specialist: 0, at_specialist: 2, marksman: 0, engineer: 0 },
+      wia: emptyRoles(),
+      kia: emptyRoles(),
+      selfRecoveryCap: 3,
+      selfAidProgress: 0,
+      fieldAidProgress: 0,
       weapons,
       abandonedWeapons: [],
     };
@@ -667,6 +769,21 @@ export interface Unit {
   hasObserver: boolean;
   isPositionCalibrated: boolean;
   fireMission?: FireMissionState;
+  indirectAmmo: number;
+  maxIndirectAmmo: number;
+  supplyCarried: number;
+  supplyCapacity: number;
+  veterancy: number;
+  offMapReconstituteAt?: number;
+  reconstituteEntryPos?: Vec;
+}
+
+export interface SupplyTransferEvent {
+  id: number;
+  t: number;
+  fromId: string;
+  toId: string;
+  pos: Vec;
 }
 
 export interface CombatShotEvent {
@@ -723,15 +840,41 @@ export interface UnitTelemetry {
   activeMoraleEvents: MoraleEventKind[];
   embarkedIn?: string;
   embarkedIds: string[];
-  weaponSlots: { id: string; name: string; ammo: AmmoType; cooldown: number; mutexGroup?: string; mutexLocked: boolean }[];
+  weaponSlots: {
+    id: string;
+    name: string;
+    ammo: AmmoType;
+    cooldown: number;
+    ammoRemaining: number;
+    maxAmmo: number;
+    mutexGroup?: string;
+    mutexLocked: boolean;
+  }[];
   subRoster?: {
     personnel: Record<SpecialistRole, number>;
+    wia: Record<SpecialistRole, number>;
+    kia: Record<SpecialistRole, number>;
+    selfRecoveryCap: number;
     assignments: { weaponId: string; role: SpecialistRole; crossManned: boolean; efficiency: number }[];
     abandoned: string[];
   };
   hasObserver: boolean;
   isPositionCalibrated: boolean;
   fireMission?: FireMissionState;
+  indirectAmmo: number;
+  maxIndirectAmmo: number;
+  supplyCarried: number;
+  supplyCapacity: number;
+  veterancy: number;
+  offMapReconstituteAt?: number;
+}
+
+export interface SupplyTransferEvent {
+  id: number;
+  t: number;
+  fromId: string;
+  toId: string;
+  pos: Vec;
 }
 
 export type EventKind =
@@ -865,8 +1008,8 @@ function cloneArmor(a: ArmorProfile): ArmorProfile {
   return { front: { ...a.front }, side: { ...a.side }, rear: { ...a.rear }, top: { ...a.top } };
 }
 
-function cloneWeapons(ws: ReadonlyArray<Omit<WeaponSlot, "cooldown">>): WeaponSlot[] {
-  return ws.map((w) => ({ ...w, cooldown: 0 }));
+function cloneWeapons(ws: ReadonlyArray<Omit<WeaponSlot, "cooldown" | "ammoRemaining">>): WeaponSlot[] {
+  return ws.map((w) => ({ ...w, cooldown: 0, ammoRemaining: w.maxAmmo }));
 }
 
 export class World {
@@ -876,6 +1019,8 @@ export class World {
   events: SimEvent[] = [];
   shotEvents: CombatShotEvent[] = [];
   supplyNodes: SupplyNode[] = [];
+  supplyEvents: SupplyTransferEvent[] = [];
+  sideResources: Record<Side, number> = { blue: 500, red: 500 };
   indirectProjectiles: IndirectProjectile[] = [];
   smokeVolumes: SmokeVolume[] = [];
   private listeners: ((e: SimEvent) => void)[] = [];
@@ -887,12 +1032,18 @@ export class World {
   private shotSeq = 0;
   private indirectSeq = 0;
   private smokeSeq = 0;
+  private supplySeq = 0;
 
   constructor(readonly map: GameMap, seed = 1) { this.random = rng(seed); }
 
   private pushShotEvent(ev: Omit<CombatShotEvent, "id">) {
     this.shotEvents.push({ id: ++this.shotSeq, ...ev });
     if (this.shotEvents.length > 256) this.shotEvents.splice(0, this.shotEvents.length - 256);
+  }
+
+  private pushSupplyEvent(fromId: string, toId: string, pos: Vec) {
+    this.supplyEvents.push({ id: ++this.supplySeq, t: this.t, fromId, toId, pos: { ...pos } });
+    if (this.supplyEvents.length > 64) this.supplyEvents.splice(0, this.supplyEvents.length - 64);
   }
 
   addSupplyNode(node: SupplyNode) { this.supplyNodes.push(node); }
@@ -911,10 +1062,13 @@ export class World {
       | "mobility" | "traits" | "headcount" | "eyeHeight" | "baseSignature" | "weaponClass" | "muzzleSignature"
       | "settledTicks" | "stuckTicks" | "embarkedIds" | "activeMoraleEvents"
       | "ownPerception" | "armor" | "weapons" | "mutexCooldowns" | "hasObserver" | "isPositionCalibrated"
+      | "indirectAmmo" | "maxIndirectAmmo" | "supplyCarried" | "supplyCapacity" | "veterancy"
     > & Partial<Unit>,
   ) {
     const st = STATS[u.type];
     const heading = u.heading ?? (u.side === "blue" ? 0 : Math.PI);
+    const maxInd = st.indirect?.maxIndirectAmmo ?? 0;
+    const cap = st.supplyCapacity ?? 0;
     const unit: Unit = {
       prevPos: { ...u.pos },
       heading,
@@ -945,6 +1099,11 @@ export class World {
       subRoster: createDefaultSubRoster(u.type),
       hasObserver: st.hasObserver,
       isPositionCalibrated: false,
+      indirectAmmo: maxInd,
+      maxIndirectAmmo: maxInd,
+      supplyCarried: cap === Infinity ? Infinity : 0, // SupplyVehicle enters empty (0 supply)
+      supplyCapacity: cap,
+      veterancy: 0,
       ...u,
     };
     this.units.push(unit);
@@ -981,9 +1140,22 @@ export class World {
 
   get(id: string) { return this.units.find((u) => u.id.toLowerCase() === id.trim().toLowerCase()); }
   alive(side?: Side) { return this.units.filter((u) => u.state !== "destroyed" && (!side || u.side === side)); }
+  onMapAlive(side?: Side) {
+    return this.units.filter((u) => u.state !== "destroyed" && u.offMapReconstituteAt === undefined && (!side || u.side === side));
+  }
+
+  private nearestMapEdge(p: Vec): Vec {
+    const edges: Vec[] = [
+      { x: 15, y: p.y },
+      { x: this.map.width - 15, y: p.y },
+      { x: p.x, y: 15 },
+      { x: p.x, y: this.map.depth - 15 },
+    ];
+    return edges.sort((a, b) => dist(p, a) - dist(p, b))[0];
+  }
 
   hasFriendlyObserverSight(side: Side, targetPos: Vec): boolean {
-    for (const o of this.alive(side)) {
+    for (const o of this.onMapAlive(side)) {
       if (!o.hasObserver || o.embarkedIn) continue;
       const res = this.map.sightline(o.pos, this.unitEyeHeight(o), targetPos, 1.5, {
         ...(o.garrison ? { ignoreBuildingIds: [o.garrison.buildingId] } : {}),
@@ -1050,6 +1222,7 @@ export class World {
 
   command(u: Unit, order: Order, roe?: Roe) {
     if (u.state === "destroyed") return "unit destroyed";
+    if (u.offMapReconstituteAt !== undefined) return `${u.id} is off-map reconstituting`;
     if (u.state === "broken") return `${u.id} is broken and falling back, not responding to orders`;
     if (order.kind === "fire_mission") {
       if (!order.dest) return "fire_mission requires target dest";
@@ -1060,12 +1233,17 @@ export class World {
       if (u.state !== "pinned") u.state = "holding";
       return "ok";
     }
+    if (order.kind === "withdraw_off_map") {
+      if (STATS[u.type].baseSpeedKmH <= 0) return `${u.id} is immobile and cannot withdraw off-map`;
+      const exitDest = order.dest ?? this.nearestMapEdge(u.pos);
+      order = { ...order, dest: exitDest, destName: order.destName ?? "map edge" };
+    }
     u.fireMission = undefined;
     if (order.dest && u.garrison) this.vacateBuilding(u);
     u.order = order;
     if (roe) u.roe = roe;
     else if (order.kind === "attack") u.roe = "fire_at_will";
-    else if (order.kind === "withdraw") u.roe = "return_fire";
+    else if (order.kind === "withdraw" || order.kind === "withdraw_off_map") u.roe = "return_fire";
     if (u.state !== "pinned") u.state = order.dest ? "moving" : "holding";
     return "ok";
   }
@@ -1269,12 +1447,42 @@ export class World {
     return assigned;
   }
 
-  /** Deterministically inflict casualties on a specific specialist role (syncs headcount & strength). */
-  inflictRosterCasualty(u: Unit, role: SpecialistRole, count = 1): boolean {
+  private restoreSubRosterWeapons(u: Unit, resetAmmo: boolean) {
+    const roster = u.subRoster;
+    if (!roster) return;
+    const def = createDefaultSubRoster(u.type);
+    if (!def) return;
+    const byId = new Map(roster.weapons.map((w) => [w.id, w]));
+    roster.weapons = def.weapons.map((dw) => {
+      const existing = byId.get(dw.id);
+      if (!existing) return dw;
+      return resetAmmo ? { ...existing, ammoRemaining: existing.maxAmmo, cooldown: 0 } : existing;
+    });
+    roster.abandonedWeapons = [];
+    this.reconcileSubRoster(u);
+  }
+
+  private healOneWia(u: Unit): boolean {
+    const roster = u.subRoster;
+    if (!roster) return false;
+    const priority: readonly SpecialistRole[] = ["at_specialist", "mg_specialist", "marksman", "engineer", "rifleman"];
+    const role = priority.find((r) => (roster.wia[r] ?? 0) > 0);
+    if (!role) return false;
+    roster.wia[role] -= 1;
+    roster.personnel[role] += 1;
+    this.restoreSubRosterWeapons(u, false);
+    const baseCount = Math.max(1, STATS[u.type].headcount);
+    u.strength = Math.min(100, (u.headcount / baseCount) * 100);
+    return true;
+  }
+
+  /** Deterministically inflict casualties on a specific specialist role (syncs headcount, WIA/KIA & strength). */
+  inflictRosterCasualty(u: Unit, role: SpecialistRole, count = 1, kind: "wia" | "kia" = "wia"): boolean {
     const roster = u.subRoster;
     if (!roster || (roster.personnel[role] ?? 0) <= 0) return false;
     const lost = Math.min(count, roster.personnel[role]);
     roster.personnel[role] -= lost;
+    roster[kind][role] += lost;
     this.reconcileSubRoster(u);
     const baseCount = Math.max(1, STATS[u.type].headcount);
     u.strength = Math.max(0, (u.headcount / baseCount) * 100);
@@ -1286,7 +1494,7 @@ export class World {
     return true;
   }
 
-  private syncRosterCasualtiesFromStrength(u: Unit) {
+  private syncRosterCasualtiesFromStrength(u: Unit, kiaRatio = u.state === "destroyed" ? 0.65 : 0.2) {
     const roster = u.subRoster;
     if (!roster) return;
     const baseCount = STATS[u.type].headcount;
@@ -1301,6 +1509,8 @@ export class World {
       if (pool.length === 0) break;
       const pick = pool[Math.floor(this.random() * pool.length)];
       roster.personnel[pick] -= 1;
+      if (this.random() < kiaRatio) roster.kia[pick] += 1;
+      else roster.wia[pick] += 1;
       living--;
     }
     this.reconcileSubRoster(u);
@@ -1315,6 +1525,8 @@ export class World {
           name: w.weapon.name,
           ammo: w.weapon.ammo,
           cooldown: w.cooldown,
+          ammoRemaining: w.ammoRemaining,
+          maxAmmo: w.maxAmmo,
           mutexGroup: w.weapon.mutexGroup,
           mutexLocked: false,
         }))
@@ -1323,6 +1535,8 @@ export class World {
           name: w.name,
           ammo: w.ammo,
           cooldown: w.cooldown,
+          ammoRemaining: w.ammoRemaining,
+          maxAmmo: w.maxAmmo,
           mutexGroup: w.mutexGroup,
           mutexLocked: !!w.mutexGroup && (u.mutexCooldowns.get(w.mutexGroup) ?? 0) > 0,
         }));
@@ -1344,6 +1558,9 @@ export class World {
       subRoster: u.subRoster && assignments
         ? {
             personnel: { ...u.subRoster.personnel },
+            wia: { ...u.subRoster.wia },
+            kia: { ...u.subRoster.kia },
+            selfRecoveryCap: u.subRoster.selfRecoveryCap,
             assignments: assignments.map((a) => ({
               weaponId: a.slot.id,
               role: a.operatorRole,
@@ -1356,6 +1573,12 @@ export class World {
       hasObserver: u.hasObserver,
       isPositionCalibrated: u.isPositionCalibrated,
       fireMission: u.fireMission ? { ...u.fireMission, targetPos: { ...u.fireMission.targetPos } } : undefined,
+      indirectAmmo: u.indirectAmmo,
+      maxIndirectAmmo: u.maxIndirectAmmo,
+      supplyCarried: u.supplyCarried,
+      supplyCapacity: u.supplyCapacity,
+      veterancy: u.veterancy,
+      offMapReconstituteAt: u.offMapReconstituteAt,
     };
   }
 
@@ -1367,12 +1590,151 @@ export class World {
     }
     this.smokeVolumes = this.smokeVolumes.filter((v) => v.expiresAt > this.t);
     this.tickIndirectProjectiles();
-    const live = this.alive();
+    this.tickLogisticsAndRecovery();
+    const live = this.onMapAlive();
     this.spot(live);
     for (const u of live) this.tickCooldowns(u);
     for (const u of live) this.tickFireMission(u);
     for (const u of live) this.fire(u);
     for (const u of live) this.bot(u);
+  }
+
+  private rearmUnit(u: Unit, maxFrac: number, budget = Infinity): number {
+    let spent = 0;
+    const stepSlot = (cur: number, max: number) => {
+      if (cur >= max || spent >= budget) return cur;
+      const add = Math.min(max - cur, Math.max(1, Math.ceil(max * maxFrac)));
+      spent += 0.5;
+      return cur + add;
+    };
+    if (u.subRoster) {
+      for (const w of u.subRoster.weapons) w.ammoRemaining = stepSlot(w.ammoRemaining, w.maxAmmo);
+    } else {
+      for (const w of u.weapons) w.ammoRemaining = stepSlot(w.ammoRemaining, w.maxAmmo);
+    }
+    if (u.indirectAmmo < u.maxIndirectAmmo && spent < budget) {
+      const add = Math.min(u.maxIndirectAmmo - u.indirectAmmo, Math.max(1, Math.ceil(u.maxIndirectAmmo * maxFrac)));
+      u.indirectAmmo += add;
+      spent += Math.max(1, add * 0.5);
+    }
+    return spent;
+  }
+
+  private tickLogisticsAndRecovery() {
+    const fobs = this.onMapAlive().filter((u) => u.type === "fob");
+    const trucks = this.onMapAlive().filter((u) => u.type === "supply_truck");
+    const fobRadius = STATS.fob.supplyRadius ?? 220;
+    const truckRadius = STATS.supply_truck.supplyRadius ?? 150;
+
+    // 1. FOB loads SupplyVehicles & directly supplies/heals frontline units inside radius
+    const fobCovered = new Set<string>();
+    for (const fob of fobs) {
+      for (const u of this.onMapAlive(fob.side)) {
+        if (u.id === fob.id || u.type === "fob" || dist(u.pos, fob.pos) > fobRadius) continue;
+        if (u.type === "supply_truck") {
+          if (u.supplyCarried < u.supplyCapacity) {
+            u.supplyCarried = Math.min(u.supplyCapacity, u.supplyCarried + 25);
+            this.pushSupplyEvent(fob.id, u.id, u.pos);
+          }
+          continue;
+        }
+        fobCovered.add(u.id);
+        let transferred = this.rearmUnit(u, 0.35) > 0;
+        if (!u.subRoster && u.strength < 100) {
+          u.strength = Math.min(100, u.strength + 8);
+          transferred = true;
+        }
+        if (u.subRoster) {
+          const wiaSum = SPECIALIST_ROLES.reduce((s, r) => s + u.subRoster!.wia[r], 0);
+          if (wiaSum > 0) {
+            u.subRoster.fieldAidProgress += 1.0;
+            while (u.subRoster.fieldAidProgress >= 1 && this.healOneWia(u)) {
+              u.subRoster.fieldAidProgress -= 1;
+              transferred = true;
+            }
+          }
+        }
+        if (transferred) this.pushSupplyEvent(fob.id, u.id, u.pos);
+      }
+    }
+
+    // 2. SupplyVehicles distribute ammo, repair vehicles, and heal WIA (consuming supplyCarried)
+    for (const sv of trucks) {
+      if (sv.supplyCarried <= 0) continue;
+      for (const u of this.onMapAlive(sv.side)) {
+        if (sv.supplyCarried <= 0) break;
+        if (u.type === "fob" || u.type === "supply_truck" || fobCovered.has(u.id) || dist(u.pos, sv.pos) > truckRadius) continue;
+        let transferred = false;
+        const ammoSpent = this.rearmUnit(u, 0.25, sv.supplyCarried);
+        if (ammoSpent > 0) {
+          sv.supplyCarried = Math.max(0, sv.supplyCarried - ammoSpent);
+          transferred = true;
+        }
+        if (!u.subRoster && u.strength < 100 && sv.supplyCarried > 0) {
+          const heal = Math.min(100 - u.strength, 2.5);
+          u.strength += heal;
+          sv.supplyCarried = Math.max(0, sv.supplyCarried - heal * 0.5);
+          transferred = true;
+        }
+        if (u.subRoster && sv.supplyCarried > 0) {
+          const wiaSum = SPECIALIST_ROLES.reduce((s, r) => s + u.subRoster!.wia[r], 0);
+          if (wiaSum > 0) {
+            u.subRoster.fieldAidProgress += 0.35;
+            if (u.subRoster.fieldAidProgress >= 1 && this.healOneWia(u)) {
+              u.subRoster.fieldAidProgress -= 1;
+              sv.supplyCarried = Math.max(0, sv.supplyCarried - 3);
+              transferred = true;
+            }
+          }
+        }
+        if (transferred) this.pushSupplyEvent(sv.id, u.id, u.pos);
+      }
+    }
+
+    // 3. Out-of-combat infantry self-aid (slow, capped at selfRecoveryCap)
+    for (const u of this.onMapAlive()) {
+      const roster = u.subRoster;
+      if (!roster) continue;
+      const wiaSum = SPECIALIST_ROLES.reduce((s, r) => s + roster.wia[r], 0);
+      if (
+        wiaSum > 0 &&
+        u.headcount < roster.selfRecoveryCap &&
+        !u.target &&
+        u.state !== "broken" &&
+        u.state !== "pinned" &&
+        this.t - u.lastHitAt >= 15 &&
+        this.t - u.lastFiredAt >= 15
+      ) {
+        roster.selfAidProgress += 0.08;
+        while (roster.selfAidProgress >= 1 && u.headcount < roster.selfRecoveryCap && this.healOneWia(u)) {
+          roster.selfAidProgress -= 1;
+        }
+      }
+    }
+
+    // 4. Off-map KIA reconstitution return (veterancy preserved, ammo & morale reset)
+    for (const u of this.units) {
+      if (u.state === "destroyed" || u.offMapReconstituteAt === undefined) continue;
+      if (this.t >= u.offMapReconstituteAt) {
+        u.offMapReconstituteAt = undefined;
+        u.pos = { ...(u.reconstituteEntryPos ?? u.rally ?? { x: 20, y: 1500 }) };
+        u.prevPos = { ...u.pos };
+        u.strength = 100;
+        u.morale = 80;
+        u.suppression = 0;
+        u.state = "holding";
+        u.order = { kind: "hold" };
+        u.indirectAmmo = u.maxIndirectAmmo;
+        for (const w of u.weapons) { w.ammoRemaining = w.maxAmmo; w.cooldown = 0; }
+        if (u.subRoster) {
+          const fresh = createDefaultSubRoster(u.type);
+          if (fresh) u.subRoster = fresh;
+          this.reconcileSubRoster(u);
+        }
+        this.casualtyMarks.delete(u.id);
+        this.emit("arrived", u, `${u.id} reconstituted and returned to map (veterancy ${u.veterancy.toFixed(1)} preserved)`);
+      }
+    }
   }
 
   private tickIndirectProjectiles() {
@@ -1439,6 +1801,13 @@ export class World {
     }
     const spec = STATS[u.type].indirect;
     if (!spec) { u.fireMission = undefined; return; }
+    if (u.indirectAmmo <= 0) {
+      u.fireMission = undefined;
+      if (u.order.kind === "fire_mission") u.order = { kind: "hold" };
+      this.emit("fire_mission", u, `${u.id} out of indirect ammunition`);
+      return;
+    }
+    u.indirectAmmo -= 1;
 
     u.heading = Math.atan2(fm.targetPos.y - u.pos.y, fm.targetPos.x - u.pos.x);
     const r = fm.dispersionRadius * Math.sqrt(this.random());
@@ -1663,7 +2032,7 @@ export class World {
     const maxR = this.maxWeaponRange(u);
     let target: Unit | undefined;
     let best = Infinity;
-    for (const e of this.alive()) {
+    for (const e of this.onMapAlive()) {
       if (e.side === u.side || e.embarkedIn) continue;
       const d = dist(u.pos, e.pos);
       if (d > maxR) continue;
@@ -1681,7 +2050,7 @@ export class World {
 
   private selectVehicleSlotsToFire(u: Unit, target: Unit, d: number): WeaponSlot[] {
     const ready = u.weapons.filter(
-      (w) => w.cooldown <= 0 && (!w.mutexGroup || (u.mutexCooldowns.get(w.mutexGroup) ?? 0) <= 0) && d <= w.range,
+      (w) => w.cooldown <= 0 && w.ammoRemaining > 0 && (!w.mutexGroup || (u.mutexCooldowns.get(w.mutexGroup) ?? 0) <= 0) && d <= w.range,
     );
     const chosen: WeaponSlot[] = [];
     const seenMutex = new Set<string>();
@@ -1765,7 +2134,7 @@ export class World {
     if (!transport && u.state !== "moving") u.heading = Math.atan2(target.pos.y - u.pos.y, target.pos.x - u.pos.x);
 
     const shots: {
-      slot: Omit<WeaponSlot, "cooldown">;
+      slot: Omit<WeaponSlot, "cooldown" | "ammoRemaining">;
       efficiency: number;
       onFired: () => void;
     }[] = [];
@@ -1775,11 +2144,12 @@ export class World {
         if (transport && a.slot.weapon.weaponClass === "heavy_weapon") continue; // no backblast weapons from firing ports
         const effRange = transport ? Math.min(a.slot.weapon.range * 0.5, 300) : a.slot.weapon.range;
         const portMult = transport ? 0.5 : 1.0;
-        if (a.slot.cooldown <= 0 && d <= effRange) {
+        if (a.slot.cooldown <= 0 && a.slot.ammoRemaining > 0 && d <= effRange) {
           shots.push({
-            slot: { ...a.slot.weapon, range: effRange },
+            slot: { ...a.slot.weapon, range: effRange, maxAmmo: a.slot.maxAmmo },
             efficiency: a.efficiency * portMult,
             onFired: () => {
+              a.slot.ammoRemaining = Math.max(0, a.slot.ammoRemaining - 1);
               a.slot.cooldown = Math.ceil(a.slot.weapon.reloadSec / Math.max(0.25, a.efficiency));
             },
           });
@@ -1791,6 +2161,7 @@ export class World {
           slot: w,
           efficiency: 1.0,
           onFired: () => {
+            w.ammoRemaining = Math.max(0, w.ammoRemaining - 1);
             w.cooldown = w.reloadSec;
             if (w.mutexGroup) u.mutexCooldowns.set(w.mutexGroup, w.mutexLockSec ?? w.reloadSec);
           },
@@ -1812,7 +2183,7 @@ export class World {
     if (maxMuzzle > 0) u.muzzleSignature = maxMuzzle;
 
     // Immediate muzzle-flash Contact check for observers on the target's side
-    for (const o of this.alive(target.side)) {
+    for (const o of this.onMapAlive(target.side)) {
       const level = this.evaluatePerception(o, u);
       if (level !== "none") {
         const prev = o.ownPerception.get(u.id) ?? "none";
@@ -1917,13 +2288,16 @@ export class World {
     const maxRadius = Math.max(20, d0 * 6);
     let totalDmg = 0;
     let anyPen = false;
-    for (const u of this.alive()) {
+    for (const u of this.onMapAlive()) {
       if (u.embarkedIn) continue;
       const d = dist(u.pos, blastPos);
       if (d > maxRadius) continue;
       const falloff = 1 / (1 + (d / Math.max(0.5, d0)) ** 2);
       const mods = this.unitModifiers(u);
-      const isOpenUnarmored = !u.traits.includes("armored") && !u.garrison && this.map.terrainIdAt(u.pos) === "open";
+      const isFob = u.type === "fob";
+      const fobDmgMult = isFob ? 0.25 : 1;
+      const fobSuppMult = isFob ? 0.2 : 1;
+      const isOpenUnarmored = !isFob && !u.traits.includes("armored") && !u.garrison && this.map.terrainIdAt(u.pos) === "open";
 
       if (isOpenUnarmored) {
         const supp = yieldSuppression * falloff;
@@ -1945,11 +2319,11 @@ export class World {
           blastHeightOffset,
           penContact,
           d0,
-          u.traits.includes("armored"),
+          u.traits.includes("armored") || isFob,
         );
         if (penRes.penetrated) anyPen = true;
-        const dmg = penRes.penetrated ? yieldDamage * falloff * (mods.damageMult ?? 1) : 0;
-        const supp = yieldSuppression * falloff * (mods.suppressionMult ?? 1);
+        const dmg = penRes.penetrated ? yieldDamage * falloff * (mods.damageMult ?? 1) * fobDmgMult : 0;
+        const supp = yieldSuppression * falloff * (mods.suppressionMult ?? 1) * fobSuppMult;
         totalDmg += dmg;
         this.hit(u, dmg, supp, by);
       }
@@ -1984,7 +2358,10 @@ export class World {
       u.morale = Math.max(0, u.morale - opts.unboundedMoraleDrain);
     } else if (dmg > 0) {
       u.morale = Math.max(0, u.morale - dmg * 0.6);
-      if (by) this.combatFeatUntil[by.side] = this.t + COMBAT_FEAT_WINDOW;
+      if (by) {
+        this.combatFeatUntil[by.side] = this.t + COMBAT_FEAT_WINDOW;
+        by.veterancy = Math.min(5, by.veterancy + Math.min(0.15, dmg * 0.005));
+      }
     } else if (resistedSupp > 0 && u.morale > MORALE_SHAKEN_MIDPOINT) {
       // SuppressionFloor: non-damaging suppression cannot push morale below shaken midpoint
       u.morale = Math.max(MORALE_SHAKEN_MIDPOINT, u.morale - resistedSupp * 0.25);
@@ -2024,18 +2401,29 @@ export class World {
       }
       u.fireMission = undefined;
       u.state = "destroyed";
-      this.syncRosterCasualtiesFromStrength(u);
+      this.syncRosterCasualtiesFromStrength(u, 0.7);
       this.emit("destroyed", u, `${u.id} has been destroyed`);
-      if (by) this.emit("enemy_destroyed", by, `destroyed enemy ${STATS[u.type].label}`);
+      if (by) {
+        by.veterancy = Math.min(5, by.veterancy + 0.5);
+        this.emit("enemy_destroyed", by, `destroyed enemy ${STATS[u.type].label}`);
+      }
     } else if (dmg > 0) {
-      this.syncRosterCasualtiesFromStrength(u);
+      this.syncRosterCasualtiesFromStrength(u, dmg >= 25 ? 0.45 : 0.2);
     }
   }
 
   // ---------- platoon bot (finite state machine) ----------
   private updateMoraleAndEvents(u: Unit, recentlyHit: boolean) {
     const events: MoraleEventKind[] = [];
-    const inSupply = this.supplyNodes.some((n) => n.side === u.side && dist(u.pos, n.pos) <= n.radius);
+    const fobR = STATS.fob.supplyRadius ?? 220;
+    const svR = STATS.supply_truck.supplyRadius ?? 150;
+    const inSupply =
+      this.supplyNodes.some((n) => n.side === u.side && dist(u.pos, n.pos) <= n.radius) ||
+      this.onMapAlive(u.side).some(
+        (s) =>
+          (s.type === "fob" && dist(u.pos, s.pos) <= fobR) ||
+          (s.type === "supply_truck" && s.supplyCarried > 0 && s.id !== u.id && dist(u.pos, s.pos) <= svR),
+      );
     if (inSupply) {
       events.push("SupplyBonus");
       u.morale = Math.min(100, u.morale + 1.2);
@@ -2048,10 +2436,10 @@ export class World {
 
     const inCombat = recentlyHit || !!u.target;
     if (inCombat) {
-      const visibleEnemies = this.alive().filter(
+      const visibleEnemies = this.onMapAlive().filter(
         (e) => e.side !== u.side && !e.embarkedIn && (u.ownPerception.get(e.id) ?? "none") !== "none",
       ).length;
-      const nearbyFriendlies = this.alive(u.side).filter((f) => !f.embarkedIn && dist(u.pos, f.pos) <= 600).length;
+      const nearbyFriendlies = this.onMapAlive(u.side).filter((f) => !f.embarkedIn && dist(u.pos, f.pos) <= 600).length;
       if (visibleEnemies >= 2 && visibleEnemies >= Math.max(1, nearbyFriendlies) * 2) {
         events.push("IsolationPenalty");
         if (u.morale > MORALE_WORRIED_MIDPOINT) {
@@ -2091,7 +2479,7 @@ export class World {
     u.suppression = Math.max(0, u.suppression - (recentlyHit ? 0.7 : 3));
     this.updateMoraleAndEvents(u, recentlyHit);
 
-    if (u.state !== "broken" && !u.embarkedIn && (u.strength < 30 || u.morale < 20)) {
+    if (u.state !== "broken" && !u.embarkedIn && u.order.kind !== "withdraw_off_map" && (u.strength < 30 || u.morale < 20)) {
       if (u.garrison) this.vacateBuilding(u);
       u.fireMission = undefined;
       u.state = "broken";
@@ -2100,7 +2488,7 @@ export class World {
       this.emit("broken", u, "unit is combat ineffective and falling back on its own");
     }
     if (u.state === "moving" || u.state === "holding") {
-      if (u.suppression > 60 && u.order.kind !== "withdraw") {
+      if (u.suppression > 60 && u.order.kind !== "withdraw" && u.order.kind !== "withdraw_off_map") {
         u.state = "pinned";
         this.emit("pinned", u, "pinned down, cannot move");
       }
@@ -2111,7 +2499,7 @@ export class World {
     if (!u.embarkedIn && (u.state === "moving" || u.state === "holding") && u.order.dest && u.order.kind !== "fire_mission") {
       const standoff =
         u.order.kind === "attack" &&
-        this.alive().some(
+        this.onMapAlive().some(
           (e) =>
             e.side !== u.side &&
             dist(u.pos, e.pos) <= STATS[u.type].range * 0.75 &&
@@ -2136,11 +2524,40 @@ export class World {
     return this.map.buildingAt(u.pos)?.id === bld.id;
   }
 
+  private exitOffMap(u: Unit) {
+    const cost = STATS[u.type].reinforceCost;
+    if (this.sideResources[u.side] < cost) {
+      u.order = { kind: "hold" };
+      if (u.state === "moving") u.state = "holding";
+      this.emit("arrived", u, `insufficient requisition (${this.sideResources[u.side]}/${cost}) for reconstitution`);
+      return;
+    }
+    this.sideResources[u.side] -= cost;
+    if (u.garrison) this.vacateBuilding(u);
+    u.target = undefined;
+    u.reconstituteEntryPos = { ...u.pos };
+    u.offMapReconstituteAt = this.t + 15;
+    u.order = { kind: "hold" };
+    u.state = "holding";
+    for (const side of ["blue", "red"] as Side[]) {
+      if (side !== u.side) this.contacts[side].delete(u.id);
+    }
+    for (const other of this.units) other.ownPerception.delete(u.id);
+    this.emit("arrived", u, `${u.id} withdrew off-map for reconstitution (-${cost} req)`);
+  }
+
   private move(u: Unit, dest: Vec) {
     if (u.garrison) this.vacateBuilding(u);
     u.isPositionCalibrated = false;
     u.fireMission = undefined;
     const d = dist(u.pos, dest);
+    if (u.order.kind === "withdraw_off_map") {
+      const nearEdge = u.pos.x <= 25 || u.pos.x >= this.map.width - 25 || u.pos.y <= 25 || u.pos.y >= this.map.depth - 25;
+      if (nearEdge || d <= 20) {
+        this.exitOffMap(u);
+        return;
+      }
+    }
     const speedMult = this.map.terrainDefAt(u.pos).speedMultiplier;
     const moraleSpeedMult = u.state === "broken" ? 1.0 : 0.65 + 0.35 * (u.morale / 100);
     const kmh = STATS[u.type].baseSpeedKmH * speedMult * moraleSpeedMult;
@@ -2162,6 +2579,10 @@ export class World {
 
     if (d <= step) {
       if (!this.canOccupy(u, dest)) {
+        if (u.order.kind === "withdraw_off_map") {
+          this.exitOffMap(u);
+          return;
+        }
         u.order = { kind: "hold" };
         if (u.state === "moving") u.state = "holding";
         return;
@@ -2169,6 +2590,10 @@ export class World {
       u.heading = Math.atan2(dest.y - u.pos.y, dest.x - u.pos.x);
       u.pos = { ...dest };
       u.stuckTicks = 0;
+      if (u.order.kind === "withdraw_off_map") {
+        this.exitOffMap(u);
+        return;
+      }
       const was = u.order;
       u.order = { kind: "hold" };
       if (u.state === "moving") {

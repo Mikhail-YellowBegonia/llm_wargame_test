@@ -21,6 +21,8 @@ const SIDC: Record<"blue" | "red", Record<UnitType, string>> = {
     artillery: "10031000141303010000",
     mlrs: "10031000141305000000",
     recon: "10031000141213000000",
+    fob: "10031000141600000000",
+    supply_truck: "10031000141606000000",
   },
   red: {
     tank: "10061000141205000000",
@@ -30,6 +32,8 @@ const SIDC: Record<"blue" | "red", Record<UnitType, string>> = {
     artillery: "10061000141303010000",
     mlrs: "10061000141305000000",
     recon: "10061000141213000000",
+    fob: "10061000141600000000",
+    supply_truck: "10061000141606000000",
   },
 };
 
@@ -237,6 +241,22 @@ function createUnitNode(u: Unit): UnitRenderNode {
     const mast = new THREE.Mesh(new THREE.BoxGeometry(0.3, 2.6, 0.3), darkMat);
     mast.position.set(-1.2, 3.2, 0.8);
     hullGroup.add(chassis, turret, mast);
+  } else if (u.type === "fob") {
+    const depot = new THREE.Mesh(new THREE.BoxGeometry(16, 4.5, 12), bodyMat);
+    depot.position.set(0, 2.25, 0);
+    const annex = new THREE.Mesh(new THREE.BoxGeometry(9, 3.2, 8), turretMat);
+    annex.position.set(11, 1.6, -2);
+    const supplyRing = new THREE.LineLoop(
+      new THREE.BufferGeometry().setFromPoints(makeCirclePoints(220, 1.2, 48)),
+      new THREE.LineBasicMaterial({ color: u.side === "blue" ? "#10b981" : "#f87171", transparent: true, opacity: 0.55 }),
+    );
+    hullGroup.add(depot, annex, supplyRing);
+  } else if (u.type === "supply_truck") {
+    const bed = new THREE.Mesh(new THREE.BoxGeometry(7.2, 2.4, 3.6), bodyMat);
+    bed.position.set(-1.5, 1.7, 0);
+    const cab = new THREE.Mesh(new THREE.BoxGeometry(2.8, 2.0, 3.4), turretMat);
+    cab.position.set(3.6, 1.5, 0);
+    hullGroup.add(bed, cab);
   } else {
     const count = Math.max(4, u.headcount || 4);
     const geo = new THREE.CylinderGeometry(0.6, 0.75, 2.5, 6);
@@ -357,6 +377,7 @@ function createVfxManager(vfxGroup: THREE.Group) {
   const projectiles: ActiveProjectile[] = [];
   const bursts: ActiveBurst[] = [];
   let lastShotId = 0;
+  let lastSupplyId = 0;
 
   const spawnBurst = (
     geo: THREE.BufferGeometry,
@@ -475,6 +496,15 @@ function createVfxManager(vfxGroup: THREE.Group) {
       if (ev.id <= lastShotId) continue;
       lastShotId = ev.id;
       if (isShotVisible(ev)) spawnShot(ev);
+    }
+    for (const sev of world.supplyEvents) {
+      if (sev.id <= lastSupplyId) continue;
+      lastSupplyId = sev.id;
+      const u = world.get(sev.toId);
+      if (u?.side === "blue") {
+        const z = world.map.elevationAt(sev.pos) + 1.8;
+        spawnBurst(ringGeo, "#10b981", new THREE.Vector3(sev.pos.x, z, -sev.pos.y), 0.75, 4, 22, 0.75, undefined, true);
+      }
     }
 
     for (let i = projectiles.length - 1; i >= 0; i--) {
@@ -932,7 +962,7 @@ export const Sandtable3D: React.FC<Props> = (props) => {
         }
 
         const isBlue = u.side === "blue";
-        const visibleUnit = isBlue || cur.god || (u.state === "destroyed" && world.contacts.blue.has(u.id));
+        const visibleUnit = (isBlue || cur.god || (u.state === "destroyed" && world.contacts.blue.has(u.id))) && u.offMapReconstituteAt === undefined;
         if (!visibleUnit || u.embarkedIn) {
           node.root.visible = false;
           node.orderLine.visible = false;

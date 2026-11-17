@@ -40,7 +40,7 @@ const KEY_STORAGE = "wargame_deepseek_key";
 const metaEnv = (import.meta as unknown as { env: { DEV?: boolean; WARGAME_MODEL?: string } }).env;
 const MOBILITIES: readonly MobilityClass[] = ["foot", "wheeled", "tracked", "amphibious"];
 const TRAITS: readonly UnitTrait[] = ["infantry", "vehicle", "armored", "low_profile", "tall_profile"];
-const SPAWN_TYPES: readonly UnitType[] = ["tank", "ifv", "infantry", "atgm", "artillery", "mlrs", "recon"];
+const SPAWN_TYPES: readonly UnitType[] = ["tank", "ifv", "infantry", "atgm", "artillery", "mlrs", "recon", "fob", "supply_truck"];
 const FIRE_AMMO_TYPES: readonly ArtilleryAmmoType[] = ["HE_Impact", "HE_Airburst", "Smoke"];
 
 export const App: React.FC = () => {
@@ -635,7 +635,7 @@ export const App: React.FC = () => {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
           <strong style={{ fontSize: 13 }}>ALPHA CO. STATUS</strong>
           <span style={{ fontSize: 11, color: "#6e6555", fontFamily: "ui-monospace, monospace" }}>
-            pos: {world.t - picture.tracksAt}s ago
+            req: {world.sideResources.blue} · {world.t - picture.tracksAt}s
           </span>
         </div>
         <div style={{ fontSize: 11, color: "#6e6555", marginBottom: 8 }}>
@@ -800,6 +800,20 @@ export const App: React.FC = () => {
                   Garrison
                 </button>
               )}
+              {selectedUnit.traits.includes("infantry") && (
+                <button
+                  style={btnStyle(selectedUnit.order.kind === "withdraw_off_map")}
+                  onClick={() => {
+                    setPendingOrder(null);
+                    const res = game.directCommand(selectedUnit.id, { kind: "withdraw_off_map" });
+                    setCommandNote(res === "ok" ? `${selectedUnit.id}: withdrawing off-map (-${STATS[selectedUnit.type].reinforceCost} req on exit)` : res);
+                    setTick((t) => t + 1);
+                  }}
+                  title="Withdraw off ground map edge to reconstitute KIA losses while preserving veterancy"
+                >
+                  Withdraw Off-Map
+                </button>
+              )}
               {(selectedUnit.type === "artillery" || selectedUnit.type === "mlrs") && (
                 <button
                   style={btnStyle(pendingOrder === "fire_mission")}
@@ -919,7 +933,22 @@ export const App: React.FC = () => {
 
             {/* Live Selected-Unit Telemetry */}
             <div style={{ background: "rgba(235,229,215,0.6)", padding: 6, borderRadius: 4, fontSize: 10.5, fontFamily: "ui-monospace, monospace" }}>
-              <div><strong>Telemetry</strong> · mob: {selectedUnit.mobility} · obs: {selectedTelemetry.hasObserver ? "YES" : "no"}</div>
+              <div><strong>Telemetry</strong> · mob: {selectedUnit.mobility} · vet: <b>{selectedTelemetry.veterancy.toFixed(1)}</b> · obs: {selectedTelemetry.hasObserver ? "YES" : "no"}</div>
+              {selectedTelemetry.offMapReconstituteAt !== undefined && (
+                <div style={{ color: "#1d4ed8", fontWeight: 700 }}>
+                  OFF-MAP RECONSTITUTING: returns in {Math.max(0, selectedTelemetry.offMapReconstituteAt - world.t)}s
+                </div>
+              )}
+              {selectedTelemetry.supplyCapacity > 0 && (
+                <div>
+                  supply: <b>{selectedTelemetry.supplyCapacity === Infinity ? "∞" : `${Math.round(selectedTelemetry.supplyCarried)}/${selectedTelemetry.supplyCapacity}`}</b>
+                </div>
+              )}
+              {selectedTelemetry.maxIndirectAmmo > 0 && (
+                <div>
+                  indirectAmmo: <b>{selectedTelemetry.indirectAmmo}/{selectedTelemetry.maxIndirectAmmo}</b>
+                </div>
+              )}
               {(selectedUnit.type === "artillery" || selectedUnit.type === "mlrs") && (
                 <div>
                   posCal: <b style={{ color: selectedTelemetry.isPositionCalibrated ? "#15803d" : "#786f60" }}>{selectedTelemetry.isPositionCalibrated ? "CALIBRATED" : "uncalibrated"}</b>
@@ -968,7 +997,7 @@ export const App: React.FC = () => {
                 <strong>Weapons:</strong>{" "}
                 {selectedTelemetry.weaponSlots.map((w) => (
                   <span key={w.id} style={{ display: "inline-block", marginRight: 5 }}>
-                    {w.id}[{w.ammo}
+                    {w.id}[{w.ammo} {w.ammoRemaining}/{w.maxAmmo}
                     {w.mutexLocked ? " LOCKED" : w.cooldown > 0 ? ` ${w.cooldown}s` : " RDY"}
                     {w.mutexGroup ? `/${w.mutexGroup}` : ""}]
                   </span>
@@ -978,6 +1007,10 @@ export const App: React.FC = () => {
                 <div style={{ marginTop: 2 }}>
                   <strong>SubRoster:</strong>{" "}
                   R:{selectedTelemetry.subRoster.personnel.rifleman} MG:{selectedTelemetry.subRoster.personnel.mg_specialist} AT:{selectedTelemetry.subRoster.personnel.at_specialist}
+                  <div style={{ color: "#9a3412" }}>
+                    WIA: {Object.values(selectedTelemetry.subRoster.wia).reduce((a, b) => a + b, 0)} ·{" "}
+                    KIA: {Object.values(selectedTelemetry.subRoster.kia).reduce((a, b) => a + b, 0)} (selfCap {selectedTelemetry.subRoster.selfRecoveryCap})
+                  </div>
                   {selectedTelemetry.subRoster.assignments.some((a) => a.crossManned) && (
                     <div style={{ color: "#b45309" }}>
                       Cross-manned:{" "}

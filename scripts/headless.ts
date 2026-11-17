@@ -248,6 +248,8 @@ function verifyPhase2B() {
         range: 1500,
         reloadSec: 1,
         cooldown: 0,
+        maxAmmo: 50,
+        ammoRemaining: 50,
         accuracy: 1.0,
         weaponClass: "light_weapon",
         muzzleSignature: 1.35,
@@ -336,6 +338,11 @@ function verifyPhase2B() {
     pos: { x: 400, y: 500 },
     subRoster: {
       personnel: { rifleman: 4, mg_specialist: 0, at_specialist: 0, marksman: 0, engineer: 0 },
+      wia: { rifleman: 0, mg_specialist: 0, at_specialist: 0, marksman: 0, engineer: 0 },
+      kia: { rifleman: 0, mg_specialist: 0, at_specialist: 0, marksman: 0, engineer: 0 },
+      selfRecoveryCap: 3,
+      selfAidProgress: 0,
+      fieldAidProgress: 0,
       weapons: [1, 2, 3, 4].map((i) => ({
         id: `r_${i}`,
         isSpecial: false,
@@ -343,6 +350,8 @@ function verifyPhase2B() {
         abandonPriority: 99,
         unskilledPenalty: 1,
         cooldown: 0,
+        maxAmmo: 30,
+        ammoRemaining: 30,
         weapon: {
           id: `r_${i}`,
           name: "Rifle",
@@ -381,6 +390,8 @@ function verifyPhase2B() {
         range: 2000,
         reloadSec: 1,
         cooldown: 0,
+        maxAmmo: 20,
+        ammoRemaining: 20,
         accuracy: 1.0,
         weaponClass: "heavy_weapon",
         muzzleSignature: 1.6,
@@ -441,6 +452,8 @@ function verifyPhase2C() {
         range: 1500,
         reloadSec: 1,
         cooldown: 0,
+        maxAmmo: 50,
+        ammoRemaining: 50,
         accuracy: 1.0,
         weaponClass: "light_weapon",
         muzzleSignature: 1.35,
@@ -687,6 +700,99 @@ function verifyPhase3A() {
 
 verifyPhase3A();
 console.log("Phase 3A artillery, ranging/calibration, 3D smoke LoS & removeUnit checks passed.");
+
+function verifyPhase3B() {
+  const m = new GameMap(3000, 2000, 1, { empty: true });
+  const w = new World(m, 42);
+
+  // 1. Finite ammo depletion & empty-on-entry SupplyVehicle -> FOB loading -> frontline rearm & repair
+  const fob = w.add({ id: "FOB1", side: "blue", type: "fob", pos: { x: 400, y: 1000 } });
+  const truck = w.add({ id: "Truck1", side: "blue", type: "supply_truck", pos: { x: 1200, y: 1000 } });
+  assert.equal(truck.supplyCarried, 0, "SupplyVehicle must spawn empty (0 supply)");
+
+  const tank = w.add({ id: "Tank1", side: "blue", type: "tank", pos: { x: 1250, y: 1000 }, roe: "fire_at_will" });
+  const dummy = w.add({ id: "RedTarget", side: "red", type: "tank", pos: { x: 1800, y: 1000 }, roe: "hold_fire" });
+  // Deplete all ammo on Tank1 and damage it
+  for (const ws of tank.weapons) ws.ammoRemaining = 0;
+  tank.strength = 70;
+  for (let i = 0; i < 4; i++) w.step();
+  assert.equal(dummy.strength, 100, "Depleted unit must not fire until resupplied");
+  assert.equal(tank.strength, 70, "Empty SupplyVehicle (0 supply) must not repair or rearm");
+
+  // Send truck to FOB to load supply, then back to Tank1
+  w.command(truck, { kind: "move", dest: { x: 450, y: 1000 } });
+  for (let i = 0; i < 120; i++) w.step();
+  assert.ok(truck.supplyCarried >= 80, "SupplyVehicle must load supply at FOB");
+  w.command(truck, { kind: "move", dest: { x: 1230, y: 1000 } });
+  for (let i = 0; i < 130; i++) w.step();
+  assert.ok(tank.weapons.some((ws) => ws.ammoRemaining > 0), "Loaded SupplyVehicle must rearm frontline unit");
+  assert.ok(tank.strength > 70, "Loaded SupplyVehicle must repair damaged vehicle strength");
+  assert.ok(truck.supplyCarried < 100, "Resupplying/repairing must consume SupplyVehicle supplyCarried");
+  assert.ok(dummy.strength < 100, "Rearmed tank must resume firing");
+  w.removeUnit("RedTarget");
+  w.removeUnit("Tank1");
+  w.removeUnit("Truck1");
+
+  // 2. WIA self-aid ceiling vs SupplyVehicle/FOB vs KIA off-map reconstitution preserving veterancy
+  const inf = w.add({ id: "Inf1", side: "blue", type: "infantry", pos: { x: 1400, y: 1000 }, veterancy: 2.5, roe: "hold_fire" });
+  // Inflict 4 WIA (headcount drops 8 -> 4, selfRecoveryCap = 6) and 1 KIA (cannot heal on-map)
+  w.inflictRosterCasualty(inf, "rifleman", 3, "wia");
+  w.inflictRosterCasualty(inf, "at_specialist", 1, "wia");
+  w.inflictRosterCasualty(inf, "mg_specialist", 1, "kia");
+  assert.equal(inf.headcount, 3);
+  assert.equal(inf.subRoster!.selfRecoveryCap, 6);
+
+  // Out-of-combat self-aid heals WIA slowly up to selfRecoveryCap (6), leaving 1 WIA + 1 KIA unhealed
+  w.t += 20;
+  for (let i = 0; i < 65; i++) w.step();
+  assert.equal(inf.headcount, 6, "Out-of-combat self-aid must cap at selfRecoveryCap");
+  const remWia = Object.values(inf.subRoster!.wia).reduce((a, b) => a + b, 0);
+  const remKia = Object.values(inf.subRoster!.kia).reduce((a, b) => a + b, 0);
+  assert.equal(remWia, 1);
+  assert.equal(remKia, 1);
+
+  // Move infantry into FOB: heals remaining 1 WIA rapidly, leaves 1 KIA untouched
+  inf.pos = { x: 450, y: 1000 };
+  for (let i = 0; i < 4; i++) w.step();
+  assert.equal(inf.headcount, 7, "FOB must heal all WIA");
+  assert.equal(Object.values(inf.subRoster!.wia).reduce((a, b) => a + b, 0), 0);
+  assert.equal(Object.values(inf.subRoster!.kia).reduce((a, b) => a + b, 0), 1, "FOB must never heal KIA");
+
+  // Withdraw off-map to reconstitute KIA with veterancy preserved and ammo/morale reset
+  inf.pos = { x: 50, y: 1000 };
+  inf.morale = 45;
+  inf.subRoster!.weapons[0].ammoRemaining = 0;
+  const reqBefore = w.sideResources.blue;
+  assert.equal(w.command(inf, { kind: "withdraw_off_map" }), "ok");
+  let reconstituted = false;
+  for (let i = 0; i < 60; i++) {
+    w.step();
+    if (w.events.some((e) => e.unit === "Inf1" && e.text.includes("reconstituted"))) {
+      reconstituted = true;
+      break;
+    }
+  }
+  assert.ok(reconstituted, "Unit must reconstitute after off-map withdrawal");
+  assert.ok(w.sideResources.blue < reqBefore, "Off-map reconstitution must deduct requisition");
+  assert.equal(inf.offMapReconstituteAt, undefined, "Unit must return after reconstitution cooldown");
+  assert.equal(inf.headcount, 8, "Off-map reconstitution must replenish KIA losses");
+  assert.equal(Object.values(inf.subRoster!.kia).reduce((a, b) => a + b, 0), 0);
+  assert.equal(inf.veterancy, 2.5, "Reconstitution must preserve veterancy");
+  assert.ok(Math.abs(inf.morale - 80) <= 0.5, "Reconstitution must reset morale");
+  assert.equal(inf.subRoster!.weapons[0].ammoRemaining, inf.subRoster!.weapons[0].maxAmmo, "Reconstitution must refill ammo");
+
+  // 3. FOB resists artillery bombardment damage/suppression compared to open infantry
+  const openInf = w.add({ id: "OpenInf", side: "blue", type: "infantry", pos: { x: 2200, y: 1000 }, roe: "hold_fire" });
+  const fobStart = fob.strength;
+  w.applyHeArtilleryBlast(fob.pos, 12, 12, 40, 50, 0);
+  w.applyHeArtilleryBlast(openInf.pos, 12, 12, 40, 50, 0);
+  const fobLoss = fobStart - fob.strength;
+  const infLoss = 100 - openInf.strength;
+  assert.ok(fobLoss < infLoss && fob.suppression < openInf.suppression, "FOB must take reduced artillery damage and suppression");
+}
+
+verifyPhase3B();
+console.log("Phase 3B logistics (FOB/SupplyVehicle), finite ammo, WIA/KIA & reconstitution checks passed.");
 
 const objective = map.resolve("Geisa")!;
 for (const u of world.alive("blue")) world.command(u, { kind: "attack", dest: objective, destName: "Geisa" });
