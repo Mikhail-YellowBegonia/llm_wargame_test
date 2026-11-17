@@ -575,6 +575,119 @@ function verifyPhase2D() {
 verifyPhase2D();
 console.log("Phase 2D interpolation snapshots & CombatShotEvent checks passed.");
 
+function verifyPhase3A() {
+  const m = new GameMap(4000, 3000, 1, { empty: true });
+  // Place a 2-story building to verify removeUnit() garrison cleanup
+  m.addBuilding({
+    id: "B_Clean",
+    footprint: [
+      { x: 980, y: 980 },
+      { x: 1020, y: 980 },
+      { x: 1020, y: 1020 },
+      { x: 980, y: 1020 },
+    ],
+    center: { x: 1000, y: 1000 },
+    groundElevation: 0,
+    roofHeight: 8,
+    floors: [
+      { level: 1, elevationOffset: 1.8, capacity: 12, integrity: 100, state: "intact", occupants: [], modifiers: { damageMult: 0.4, suppressionMult: 0.45 } },
+    ],
+  });
+
+  const w = new World(m, 31);
+  const spg = w.add({ id: "SPG1", side: "blue", type: "artillery", pos: { x: 200, y: 1500 }, roe: "hold_fire" });
+  const mlrs = w.add({ id: "MLRS1", side: "blue", type: "mlrs", pos: { x: 200, y: 1800 }, roe: "hold_fire" });
+  const recon = w.add({ id: "Recon1", side: "blue", type: "recon", pos: { x: 1600, y: 1500 }, roe: "hold_fire" });
+  const tgtVisible = w.add({ id: "RedVis", side: "red", type: "infantry", pos: { x: 2400, y: 1500 }, roe: "hold_fire" });
+  const tgtBlind = { x: 2400, y: 2700 };
+
+  assert.equal(recon.hasObserver, true);
+  assert.equal(spg.hasObserver, false);
+
+  // 1. Observer-assisted HE_Airburst: 2 Ranging rounds halving dispersion, then FFE + isPositionCalibrated
+  assert.equal(w.command(spg, { kind: "fire_mission", dest: tgtVisible.pos, ammoType: "HE_Airburst" }), "ok");
+  assert.equal(spg.fireMission?.phase, "ranging");
+  assert.equal(spg.fireMission?.effectiveAmmo, "HE_Airburst");
+  assert.equal(spg.fireMission?.rangingNeeded, 2);
+  const disp0 = spg.fireMission!.dispersionRadius;
+  w.step(); // fires 1st ranging round
+  assert.equal(spg.fireMission?.rangingFired, 1);
+  assert.ok(Math.abs(spg.fireMission!.dispersionRadius - disp0 * 0.5) < 1e-6, "1st ranging round must halve dispersion");
+  for (let i = 0; i < 4; i++) w.step(); // completes 2nd ranging round
+  assert.equal(spg.fireMission?.phase, "ffe");
+  assert.equal(spg.isPositionCalibrated, true, "Completed ranging must calibrate firing position");
+
+  // Wait for Airburst shells to impact and confirm elevated +15m burst event with 5x d0
+  for (let i = 0; i < 15; i++) w.step();
+  const airEv = w.shotEvents.find((e) => e.shooterId === "SPG1" && e.artilleryAmmo === "HE_Airburst");
+  assert.ok(airEv, "Observed HE_Airburst must resolve elevated burst event");
+  assert.equal(airEv!.blastHeightOffset, 15);
+  assert.equal(airEv!.blastRadius, 40);
+
+  // 2. Registration-point ("放空炮") target shift to blind target preserves calibration bonus, then move resets it
+  w.removeUnit("Recon1"); // remove observer so next target is unobserved
+  assert.equal(w.hasFriendlyObserverSight("blue", tgtBlind), false);
+  assert.equal(w.command(spg, { kind: "fire_mission", dest: tgtBlind, ammoType: "HE_Airburst" }), "ok");
+  assert.equal(spg.fireMission?.phase, "ffe", "Blind fire must skip ranging");
+  assert.equal(spg.fireMission?.effectiveAmmo, "HE_Impact", "Blind fire must degrade HE_Airburst to HE_Impact");
+  assert.ok(spg.fireMission!.dispersionRadius < 120, "Calibrated battery shifting to blind target must retain partial accuracy bonus");
+
+  // Moving resets isPositionCalibrated
+  w.command(spg, { kind: "move", dest: { x: 260, y: 1500 } });
+  w.step();
+  assert.equal(spg.isPositionCalibrated, false, "Displacing battery must reset isPositionCalibrated");
+
+  // 3. MLRS never calibrates or conducts ranging
+  const recon2 = w.add({ id: "Recon2", side: "blue", type: "recon", pos: { x: 1600, y: 1500 }, roe: "hold_fire" });
+  assert.equal(w.command(mlrs, { kind: "fire_mission", dest: tgtVisible.pos, ammoType: "HE_Airburst" }), "ok");
+  assert.equal(mlrs.fireMission?.phase, "ffe");
+  assert.equal(mlrs.fireMission?.effectiveAmmo, "HE_Impact");
+  assert.equal(mlrs.isPositionCalibrated, false);
+  for (let i = 0; i < 8; i++) w.step();
+  assert.equal(mlrs.isPositionCalibrated, false);
+
+  // 4. Smoke mission: 0 ranging, half dispersion, spawns DynamicOcclusionVolume blocking 3D sightline() & Visual
+  const smokeTarget = { x: 2000, y: 1500 };
+  assert.equal(w.command(spg, { kind: "fire_mission", dest: smokeTarget, ammoType: "Smoke" }), "ok");
+  assert.equal(spg.fireMission?.phase, "ffe");
+  assert.equal(spg.fireMission?.rangingNeeded, 0);
+  assert.equal(spg.fireMission?.dispersionRadius, 60, "Smoke must receive intrinsic 2x accuracy bonus (half dispersion)");
+  for (let i = 0; i < 12; i++) w.step();
+  assert.ok(w.smokeVolumes.length > 0, "Smoke impact must spawn DynamicOcclusionVolume");
+  const sv = w.smokeVolumes[0];
+  const sightThroughSmoke = m.sightline(
+    { x: sv.center.x - 150, y: sv.center.y },
+    2,
+    { x: sv.center.x + 150, y: sv.center.y },
+    2,
+    { dynamicVolumes: w.smokeVolumes },
+  );
+  assert.ok(sightThroughSmoke.transmittance < 0.05, "Smoke volume must attenuate 3D sightline transmittance");
+  // Place observer & target directly across smoke cloud and verify Visual spotting is suppressed
+  recon2.pos = { x: sv.center.x - 200, y: sv.center.y };
+  tgtVisible.pos = { x: sv.center.x + 200, y: sv.center.y };
+  w.step();
+  assert.notEqual(recon2.ownPerception.get("RedVis"), "visual", "Smoke occlusion must block Visual detection across cloud");
+
+  // 5. removeUnit() cleans garrison, embarked, contacts, and target references
+  const garInf = w.add({ id: "GarInf", side: "blue", type: "infantry", pos: { x: 1000, y: 1000 }, roe: "hold_fire" });
+  assert.equal(w.garrisonFloor(garInf, "B_Clean", 1), "ok");
+  const ifv = w.add({ id: "TmpIfv", side: "blue", type: "ifv", pos: { x: 500, y: 500 }, roe: "hold_fire" });
+  const pax = w.add({ id: "TmpPax", side: "blue", type: "infantry", pos: { x: 500, y: 500 }, roe: "hold_fire" });
+  assert.equal(w.embark(pax, ifv), "ok");
+  recon2.target = "RedVis";
+  assert.equal(w.removeUnit("GarInf"), true);
+  assert.equal(m.buildings[0].floors[0].occupants.includes("GarInf"), false, "removeUnit must clear BuildingFloor.occupants");
+  assert.equal(w.removeUnit("TmpIfv"), true);
+  assert.equal(pax.embarkedIn, undefined, "removeUnit on transport must clear passenger embarkedIn");
+  assert.equal(w.removeUnit("RedVis"), true);
+  assert.equal(recon2.target, undefined, "removeUnit must clear target references on other units");
+  assert.equal(w.contacts.blue.has("RedVis"), false, "removeUnit must clear contacts references");
+}
+
+verifyPhase3A();
+console.log("Phase 3A artillery, ranging/calibration, 3D smoke LoS & removeUnit checks passed.");
+
 const objective = map.resolve("Geisa")!;
 for (const u of world.alive("blue")) world.command(u, { kind: "attack", dest: objective, destName: "Geisa" });
 

@@ -29,6 +29,9 @@ export function placesBrief(world: World) {
 function orderWord(world: World, u: Unit) {
   const o = u.order;
   if (o.kind === "hold" || !o.dest) return "hold";
+  if (o.kind === "fire_mission") {
+    return `fire mission (${u.fireMission?.effectiveAmmo ?? o.ammoType ?? "HE_Impact"}) at ${o.destName ? o.destName + " " : ""}grid ${world.map.toGrid(o.dest)}`;
+  }
   return `${o.kind} to ${o.destName ? o.destName + " " : ""}grid ${world.map.toGrid(o.dest)}`;
 }
 

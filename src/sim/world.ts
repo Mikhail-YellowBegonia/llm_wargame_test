@@ -1,18 +1,59 @@
 // Simulation core: units, platoon-level bot state machine, two-tier spotting, 10m mobility/garrison,
 // Phase 2B own-optics accuracy, directional KE/CE armor, HE inverse-square law, infantry takeover,
 // Phase 2C 4-tier morale, SuppressionFloor, Cowering, morale events, and vehicle patches.
-import { ArmorValue, CombatModifiers, DEFAULT_BUILDING_ARMOR, GameMap, MobilityClass, TerrainId, UnitTrait, Vec, dist, rng } from "./map";
+import { ArmorValue, CombatModifiers, DEFAULT_BUILDING_ARMOR, DynamicOcclusionVolume, GameMap, MobilityClass, TerrainId, UnitTrait, Vec, dist, rng } from "./map";
 
 export type { ArmorValue };
 export type Side = "blue" | "red";
-export type UnitType = "tank" | "ifv" | "infantry" | "atgm";
+export type UnitType = "tank" | "ifv" | "infantry" | "atgm" | "artillery" | "mlrs" | "recon";
+export type ArtilleryAmmoType = "HE_Impact" | "HE_Airburst" | "Smoke" | "Direct_Self_Defense";
 export type Roe = "fire_at_will" | "return_fire" | "hold_fire";
-export type OrderKind = "hold" | "move" | "attack" | "withdraw";
+export type OrderKind = "hold" | "move" | "attack" | "withdraw" | "fire_mission";
 export interface UnitGarrison {
   buildingId: string;
   floorLevel: number;
 }
-export interface Order { kind: OrderKind; dest?: Vec; destName?: string; garrison?: UnitGarrison }
+export interface Order {
+  kind: OrderKind;
+  dest?: Vec;
+  destName?: string;
+  garrison?: UnitGarrison;
+  ammoType?: ArtilleryAmmoType;
+}
+export interface FireMissionState {
+  targetPos: Vec;
+  requestedAmmo: ArtilleryAmmoType;
+  effectiveAmmo: Exclude<ArtilleryAmmoType, "Direct_Self_Defense">;
+  phase: "ranging" | "ffe";
+  rangingFired: number;
+  rangingNeeded: number;
+  dispersionRadius: number;
+  salvoRemaining: number;
+  cooldown: number;
+  calibratedThisMission: boolean;
+}
+export interface IndirectProjectile {
+  id: number;
+  shooterId: string;
+  side: Side;
+  from: Vec;
+  fromZ: number;
+  to: Vec;
+  toZ: number;
+  ammo: Exclude<ArtilleryAmmoType, "Direct_Self_Defense">;
+  timeRemaining: number;
+  totalFlightTime: number;
+  penContact: number;
+  d0: number;
+  yieldDamage: number;
+  yieldSuppression: number;
+  blastHeightOffset: number;
+  smokeRadius?: number;
+}
+export interface SmokeVolume extends DynamicOcclusionVolume {
+  id: number;
+  expiresAt: number;
+}
 
 export type BotState = "holding" | "moving" | "pinned" | "broken" | "destroyed";
 export type MoraleTier = "calm" | "worried" | "shaken" | "panicked";
@@ -72,9 +113,26 @@ export interface AssignedInfantryWeapon {
   efficiency: number;
 }
 
+interface IndirectProfile {
+  minRange: number;
+  maxRange: number;
+  baseDispersion: number;
+  salvoCount: number;
+  salvoIntervalSec: number;
+  rangingIntervalSec: number;
+  penContact: number;
+  d0: number;
+  yieldDamage: number;
+  yieldSuppression: number;
+  supportsCalibration: boolean;
+  supportsAirburst: boolean;
+  supportsSmoke: boolean;
+}
+
 interface TypeStats {
   label: string;
   armored: boolean;
+  hasObserver: boolean;
   mobility: MobilityClass;
   traits: ReadonlyArray<UnitTrait>;
   headcount: number;
@@ -87,6 +145,7 @@ interface TypeStats {
   baseSpeedKmH: number;
   passengerCapacity?: number;
   hasFiringPorts?: boolean;
+  indirect?: IndirectProfile;
   armor: ArmorProfile;
   weapons: ReadonlyArray<Omit<WeaponSlot, "cooldown">>;
 }
@@ -102,6 +161,7 @@ export const STATS: Record<UnitType, TypeStats> = {
   tank: {
     label: "tank platoon",
     armored: true,
+    hasObserver: false,
     mobility: "tracked",
     traits: ["vehicle", "armored", "tall_profile"],
     headcount: 0,
@@ -168,6 +228,7 @@ export const STATS: Record<UnitType, TypeStats> = {
   ifv: {
     label: "mech infantry platoon",
     armored: true,
+    hasObserver: false,
     mobility: "tracked",
     traits: ["vehicle", "armored", "tall_profile"],
     headcount: 0,
@@ -235,6 +296,7 @@ export const STATS: Record<UnitType, TypeStats> = {
   infantry: {
     label: "infantry platoon",
     armored: false,
+    hasObserver: true,
     mobility: "foot",
     traits: ["infantry", "low_profile"],
     headcount: 8,
@@ -251,6 +313,7 @@ export const STATS: Record<UnitType, TypeStats> = {
   atgm: {
     label: "ATGM section",
     armored: false,
+    hasObserver: false,
     mobility: "foot",
     traits: ["infantry", "low_profile"],
     headcount: 4,
@@ -263,6 +326,172 @@ export const STATS: Record<UnitType, TypeStats> = {
     baseSpeedKmH: 4,
     armor: SOFT_ARMOR,
     weapons: [],
+  },
+  artillery: {
+    label: "SP artillery battery",
+    armored: true,
+    hasObserver: false,
+    mobility: "tracked",
+    traits: ["vehicle", "armored", "tall_profile"],
+    headcount: 0,
+    eyeHeight: 2.9,
+    baseSignature: 1.05,
+    weaponClass: "heavy_weapon",
+    muzzleSignature: 1.9,
+    range: 800,
+    spot: 1500,
+    baseSpeedKmH: 26,
+    indirect: {
+      minRange: 250,
+      maxRange: 5000,
+      baseDispersion: 120,
+      salvoCount: 4,
+      salvoIntervalSec: 2,
+      rangingIntervalSec: 3,
+      penContact: 12,
+      d0: 8,
+      yieldDamage: 36,
+      yieldSuppression: 48,
+      supportsCalibration: true,
+      supportsAirburst: true,
+      supportsSmoke: true,
+    },
+    armor: {
+      front: { ke: 3, ce: 4 },
+      side: { ke: 2, ce: 2 },
+      rear: { ke: 1, ce: 1 },
+      top: { ke: 1, ce: 1 },
+    },
+    weapons: [
+      {
+        id: "155mm_direct",
+        name: "155mm Direct HEAT/AP",
+        ammo: "HEAT",
+        pen: 14,
+        damage: 28,
+        suppression: 18,
+        range: 800,
+        reloadSec: 8,
+        accuracy: 0.58,
+        weaponClass: "heavy_weapon",
+        muzzleSignature: 1.8,
+        mutexGroup: "spg_breech",
+        mutexLockSec: 8,
+      },
+      {
+        id: "spg_aa_mg",
+        name: "7.62mm Defense MG",
+        ammo: "AP",
+        pen: 1.5,
+        damage: 4,
+        suppression: 7,
+        range: 550,
+        reloadSec: 1,
+        accuracy: 0.6,
+        weaponClass: "small_arms",
+        muzzleSignature: 0.9,
+      },
+    ],
+  },
+  mlrs: {
+    label: "MLRS battery",
+    armored: true,
+    hasObserver: false,
+    mobility: "tracked",
+    traits: ["vehicle", "armored", "tall_profile"],
+    headcount: 0,
+    eyeHeight: 3.0,
+    baseSignature: 1.15,
+    weaponClass: "heavy_weapon",
+    muzzleSignature: 2.2,
+    range: 500,
+    spot: 1400,
+    baseSpeedKmH: 24,
+    indirect: {
+      minRange: 400,
+      maxRange: 6000,
+      baseDispersion: 180,
+      salvoCount: 6,
+      salvoIntervalSec: 1,
+      rangingIntervalSec: 1,
+      penContact: 10,
+      d0: 9,
+      yieldDamage: 30,
+      yieldSuppression: 44,
+      supportsCalibration: false,
+      supportsAirburst: false,
+      supportsSmoke: true,
+    },
+    armor: {
+      front: { ke: 2, ce: 3 },
+      side: { ke: 1, ce: 2 },
+      rear: { ke: 1, ce: 1 },
+      top: { ke: 1, ce: 1 },
+    },
+    weapons: [
+      {
+        id: "mlrs_mg",
+        name: "7.62mm Cab MG",
+        ammo: "AP",
+        pen: 1.2,
+        damage: 4,
+        suppression: 6,
+        range: 500,
+        reloadSec: 1,
+        accuracy: 0.55,
+        weaponClass: "small_arms",
+        muzzleSignature: 0.85,
+      },
+    ],
+  },
+  recon: {
+    label: "recon section",
+    armored: true,
+    hasObserver: true,
+    mobility: "wheeled",
+    traits: ["vehicle", "armored", "low_profile"],
+    headcount: 0,
+    eyeHeight: 2.5,
+    baseSignature: 0.55,
+    weaponClass: "light_weapon",
+    muzzleSignature: 1.05,
+    range: 1000,
+    spot: 2800,
+    baseSpeedKmH: 42,
+    armor: {
+      front: { ke: 3, ce: 4 },
+      side: { ke: 2, ce: 2 },
+      rear: { ke: 1, ce: 1 },
+      top: { ke: 1, ce: 1 },
+    },
+    weapons: [
+      {
+        id: "20mm_autocannon",
+        name: "20mm Autocannon",
+        ammo: "AP",
+        pen: 4.5,
+        damage: 7,
+        suppression: 10,
+        range: 1000,
+        reloadSec: 2,
+        accuracy: 0.7,
+        weaponClass: "light_weapon",
+        muzzleSignature: 1.15,
+      },
+      {
+        id: "recon_mg",
+        name: "7.62mm Coax MG",
+        ammo: "AP",
+        pen: 1.2,
+        damage: 4.5,
+        suppression: 7,
+        range: 600,
+        reloadSec: 1,
+        accuracy: 0.65,
+        weaponClass: "small_arms",
+        muzzleSignature: 0.9,
+      },
+    ],
   },
 };
 
@@ -435,6 +664,9 @@ export interface Unit {
   weapons: WeaponSlot[];
   mutexCooldowns: Map<string, number>;
   subRoster?: InfantrySubRoster;
+  hasObserver: boolean;
+  isPositionCalibrated: boolean;
+  fireMission?: FireMissionState;
 }
 
 export interface CombatShotEvent {
@@ -447,6 +679,9 @@ export interface CombatShotEvent {
   to: Vec;
   toZ: number;
   ammo: AmmoType;
+  artilleryAmmo?: ArtilleryAmmoType;
+  blastHeightOffset?: number;
+  smokeRadius?: number;
   weaponClass: WeaponSignatureClass;
   hit: boolean;
   penetrated: boolean;
@@ -494,11 +729,14 @@ export interface UnitTelemetry {
     assignments: { weaponId: string; role: SpecialistRole; crossManned: boolean; efficiency: number }[];
     abandoned: string[];
   };
+  hasObserver: boolean;
+  isPositionCalibrated: boolean;
+  fireMission?: FireMissionState;
 }
 
 export type EventKind =
   | "contact" | "under_fire" | "pinned" | "recovered" | "casualties"
-  | "arrived" | "broken" | "destroyed" | "enemy_destroyed";
+  | "arrived" | "broken" | "destroyed" | "enemy_destroyed" | "fire_mission";
 export interface SimEvent { t: number; kind: EventKind; unit: string; text: string }
 
 const SETTLE_THRESHOLD_TICKS = 15;
@@ -638,6 +876,8 @@ export class World {
   events: SimEvent[] = [];
   shotEvents: CombatShotEvent[] = [];
   supplyNodes: SupplyNode[] = [];
+  indirectProjectiles: IndirectProjectile[] = [];
+  smokeVolumes: SmokeVolume[] = [];
   private listeners: ((e: SimEvent) => void)[] = [];
   private random: () => number;
   private casualtyMarks = new Map<string, number>();
@@ -645,6 +885,8 @@ export class World {
   private combatFeatUntil: Record<Side, number> = { blue: -1e9, red: -1e9 };
   private artilleryShockUntil = new Map<string, number>();
   private shotSeq = 0;
+  private indirectSeq = 0;
+  private smokeSeq = 0;
 
   constructor(readonly map: GameMap, seed = 1) { this.random = rng(seed); }
 
@@ -668,7 +910,7 @@ export class World {
       | "prevPos" | "heading" | "prevHeading" | "strength" | "suppression" | "morale" | "state" | "lastFiredAt" | "lastHitAt" | "roe" | "order"
       | "mobility" | "traits" | "headcount" | "eyeHeight" | "baseSignature" | "weaponClass" | "muzzleSignature"
       | "settledTicks" | "stuckTicks" | "embarkedIds" | "activeMoraleEvents"
-      | "ownPerception" | "armor" | "weapons" | "mutexCooldowns"
+      | "ownPerception" | "armor" | "weapons" | "mutexCooldowns" | "hasObserver" | "isPositionCalibrated"
     > & Partial<Unit>,
   ) {
     const st = STATS[u.type];
@@ -701,18 +943,124 @@ export class World {
       weapons: cloneWeapons(st.weapons),
       mutexCooldowns: new Map(),
       subRoster: createDefaultSubRoster(u.type),
+      hasObserver: st.hasObserver,
+      isPositionCalibrated: false,
       ...u,
     };
     this.units.push(unit);
     return unit;
   }
 
+  /** Cleanly remove a unit and purge all building, transport, contact, and targeting references. */
+  removeUnit(id: string): boolean {
+    const u = this.get(id);
+    if (!u) return false;
+    if (u.garrison) this.vacateBuilding(u);
+    if (u.embarkedIn) this.disembark(u);
+    for (const pid of [...u.embarkedIds]) {
+      const p = this.get(pid);
+      if (p) this.disembark(p);
+    }
+    this.units = this.units.filter((x) => x.id !== u.id);
+    for (const side of ["blue", "red"] as Side[]) {
+      const map = this.contacts[side];
+      map.delete(u.id);
+      for (const [cid, c] of map) {
+        if (c.seenBy === u.id) map.delete(cid);
+      }
+    }
+    for (const other of this.units) {
+      if (other.target === u.id) other.target = undefined;
+      other.ownPerception.delete(u.id);
+    }
+    this.casualtyMarks.delete(u.id);
+    this.underFireReported.delete(u.id);
+    this.artilleryShockUntil.delete(u.id);
+    return true;
+  }
+
   get(id: string) { return this.units.find((u) => u.id.toLowerCase() === id.trim().toLowerCase()); }
   alive(side?: Side) { return this.units.filter((u) => u.state !== "destroyed" && (!side || u.side === side)); }
+
+  hasFriendlyObserverSight(side: Side, targetPos: Vec): boolean {
+    for (const o of this.alive(side)) {
+      if (!o.hasObserver || o.embarkedIn) continue;
+      const res = this.map.sightline(o.pos, this.unitEyeHeight(o), targetPos, 1.5, {
+        ...(o.garrison ? { ignoreBuildingIds: [o.garrison.buildingId] } : {}),
+        ...(this.smokeVolumes.length > 0 ? { dynamicVolumes: this.smokeVolumes } : {}),
+      });
+      if (!res.blocked && res.transmittance >= 0.05 && res.distance <= this.effectiveSpotRange(o)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private startFireMission(u: Unit, dest: Vec, ammoType?: ArtilleryAmmoType): string {
+    const spec = STATS[u.type].indirect;
+    if (!spec) return `${u.id} (${STATS[u.type].label}) cannot execute indirect fire missions`;
+    const d = dist(u.pos, dest);
+    if (d < spec.minRange || d > spec.maxRange) {
+      return `target out of indirect range (${Math.round(d)}m; valid ${spec.minRange}–${spec.maxRange}m)`;
+    }
+    const requested: ArtilleryAmmoType = !ammoType || ammoType === "Direct_Self_Defense" ? "HE_Impact" : ammoType;
+    let effectiveAmmo: Exclude<ArtilleryAmmoType, "Direct_Self_Defense">;
+    let phase: "ranging" | "ffe" = "ffe";
+    let rangingNeeded = 0;
+    let dispersionRadius = spec.baseDispersion;
+
+    if (requested === "Smoke" && spec.supportsSmoke) {
+      effectiveAmmo = "Smoke";
+      dispersionRadius = spec.baseDispersion * 0.5 * (u.isPositionCalibrated ? 0.75 : 1.0);
+    } else if (!spec.supportsCalibration) {
+      effectiveAmmo = requested === "HE_Airburst" ? "HE_Impact" : requested;
+    } else {
+      const observed = this.hasFriendlyObserverSight(u.side, dest);
+      if (observed) {
+        effectiveAmmo = requested;
+        phase = "ranging";
+        rangingNeeded = 2;
+        dispersionRadius = spec.baseDispersion * (u.isPositionCalibrated ? 0.65 : 1.0);
+      } else {
+        effectiveAmmo = requested === "HE_Airburst" ? "HE_Impact" : requested;
+        dispersionRadius = spec.baseDispersion * (u.isPositionCalibrated ? 0.6 : 1.0);
+      }
+    }
+
+    u.fireMission = {
+      targetPos: { ...dest },
+      requestedAmmo: requested,
+      effectiveAmmo,
+      phase,
+      rangingFired: 0,
+      rangingNeeded,
+      dispersionRadius,
+      salvoRemaining: spec.salvoCount,
+      cooldown: 0,
+      calibratedThisMission: false,
+    };
+    u.heading = Math.atan2(dest.y - u.pos.y, dest.x - u.pos.x);
+    this.emit(
+      "fire_mission",
+      u,
+      `fire mission (${effectiveAmmo}${requested === "HE_Airburst" && effectiveAmmo === "HE_Impact" ? " degraded from Airburst" : ""}) at ${this.map.describe(dest)}: ${phase === "ranging" ? "2-round ranging" : u.isPositionCalibrated ? "calibrated FFE" : "uncalibrated FFE"}`,
+    );
+    return "ok";
+  }
 
   command(u: Unit, order: Order, roe?: Roe) {
     if (u.state === "destroyed") return "unit destroyed";
     if (u.state === "broken") return `${u.id} is broken and falling back, not responding to orders`;
+    if (order.kind === "fire_mission") {
+      if (!order.dest) return "fire_mission requires target dest";
+      const fmRes = this.startFireMission(u, order.dest, order.ammoType);
+      if (fmRes !== "ok") return fmRes;
+      u.order = order;
+      if (roe) u.roe = roe;
+      if (u.state !== "pinned") u.state = "holding";
+      return "ok";
+    }
+    u.fireMission = undefined;
     if (order.dest && u.garrison) this.vacateBuilding(u);
     u.order = order;
     if (roe) u.roe = roe;
@@ -932,6 +1280,7 @@ export class World {
     u.strength = Math.max(0, (u.headcount / baseCount) * 100);
     if (u.headcount <= 0) {
       this.vacateBuilding(u);
+      u.fireMission = undefined;
       u.state = "destroyed";
     }
     return true;
@@ -1004,6 +1353,9 @@ export class World {
             abandoned: [...u.subRoster.abandonedWeapons],
           }
         : undefined,
+      hasObserver: u.hasObserver,
+      isPositionCalibrated: u.isPositionCalibrated,
+      fireMission: u.fireMission ? { ...u.fireMission, targetPos: { ...u.fireMission.targetPos } } : undefined,
     };
   }
 
@@ -1013,11 +1365,136 @@ export class World {
       u.prevPos = { ...u.pos };
       u.prevHeading = u.heading;
     }
+    this.smokeVolumes = this.smokeVolumes.filter((v) => v.expiresAt > this.t);
+    this.tickIndirectProjectiles();
     const live = this.alive();
     this.spot(live);
     for (const u of live) this.tickCooldowns(u);
+    for (const u of live) this.tickFireMission(u);
     for (const u of live) this.fire(u);
     for (const u of live) this.bot(u);
+  }
+
+  private tickIndirectProjectiles() {
+    const remaining: IndirectProjectile[] = [];
+    for (const p of this.indirectProjectiles) {
+      p.timeRemaining -= 1;
+      if (p.timeRemaining > 0) {
+        remaining.push(p);
+        continue;
+      }
+      const by = this.get(p.shooterId);
+      if (p.ammo === "Smoke") {
+        const radius = p.smokeRadius ?? 75;
+        const groundZ = this.map.elevationAt(p.to);
+        this.smokeVolumes.push({
+          id: ++this.smokeSeq,
+          center: { ...p.to },
+          radius,
+          minZ: groundZ,
+          height: 18,
+          transmittancePer100m: 0.005,
+          expiresAt: this.t + 60,
+        });
+        this.pushShotEvent({
+          t: this.t,
+          shooterId: p.shooterId,
+          from: { ...p.from },
+          fromZ: p.fromZ,
+          to: { ...p.to },
+          toZ: groundZ,
+          ammo: "HE",
+          artilleryAmmo: "Smoke",
+          smokeRadius: radius,
+          weaponClass: "heavy_weapon",
+          hit: true,
+          penetrated: false,
+          damageDealt: 0,
+          blastRadius: radius,
+        });
+      } else {
+        this.applyHeArtilleryBlast(
+          p.to,
+          p.penContact,
+          p.d0,
+          p.yieldDamage,
+          p.yieldSuppression,
+          p.blastHeightOffset,
+          by,
+          p.ammo,
+          p.from,
+          p.fromZ,
+        );
+      }
+    }
+    this.indirectProjectiles = remaining;
+  }
+
+  private tickFireMission(u: Unit) {
+    const fm = u.fireMission;
+    if (!fm || u.state === "destroyed" || u.state === "broken" || u.state === "pinned") return;
+    if (fm.cooldown > 0) {
+      fm.cooldown = Math.max(0, fm.cooldown - this.moraleRofRate(u));
+      if (fm.cooldown > 0) return;
+    }
+    const spec = STATS[u.type].indirect;
+    if (!spec) { u.fireMission = undefined; return; }
+
+    u.heading = Math.atan2(fm.targetPos.y - u.pos.y, fm.targetPos.x - u.pos.x);
+    const r = fm.dispersionRadius * Math.sqrt(this.random());
+    const ang = this.random() * Math.PI * 2;
+    const rawX = fm.targetPos.x + Math.cos(ang) * r;
+    const rawY = fm.targetPos.y + Math.sin(ang) * r;
+    const impactPos = {
+      x: Math.min(this.map.width - 5, Math.max(5, rawX)),
+      y: Math.min(this.map.depth - 5, Math.max(5, rawY)),
+    };
+    const flightTime = Math.max(2, Math.round(dist(u.pos, impactPos) / 300));
+    const isAirburst = fm.effectiveAmmo === "HE_Airburst";
+    const blastHeightOffset = isAirburst ? 15 : 0;
+    const fromZ = this.map.elevationAt(u.pos) + this.unitEyeHeight(u);
+    const toZ = this.map.elevationAt(impactPos) + blastHeightOffset;
+
+    this.indirectProjectiles.push({
+      id: ++this.indirectSeq,
+      shooterId: u.id,
+      side: u.side,
+      from: { ...u.pos },
+      fromZ,
+      to: impactPos,
+      toZ,
+      ammo: fm.effectiveAmmo,
+      timeRemaining: flightTime,
+      totalFlightTime: flightTime,
+      penContact: isAirburst ? spec.penContact * 0.5 : spec.penContact,
+      d0: isAirburst ? spec.d0 * 5 : spec.d0,
+      yieldDamage: spec.yieldDamage,
+      yieldSuppression: spec.yieldSuppression,
+      blastHeightOffset,
+      smokeRadius: fm.effectiveAmmo === "Smoke" ? 75 : undefined,
+    });
+
+    u.lastFiredAt = this.t;
+    u.weaponClass = "heavy_weapon";
+    u.muzzleSignature = STATS[u.type].muzzleSignature;
+
+    if (fm.phase === "ranging") {
+      fm.rangingFired += 1;
+      fm.dispersionRadius *= 0.5;
+      fm.cooldown = spec.rangingIntervalSec;
+      if (fm.rangingFired >= fm.rangingNeeded) {
+        fm.phase = "ffe";
+        fm.calibratedThisMission = true;
+        if (spec.supportsCalibration) u.isPositionCalibrated = true;
+      }
+    } else {
+      fm.salvoRemaining -= 1;
+      fm.cooldown = spec.salvoIntervalSec;
+      if (fm.salvoRemaining <= 0) {
+        u.fireMission = undefined;
+        if (u.order.kind === "fire_mission") u.order = { kind: "hold" };
+      }
+    }
   }
 
   private moraleRofRate(u: Unit): number {
@@ -1046,12 +1523,18 @@ export class World {
     const ignoreBuildingIds: string[] = [];
     if (o.garrison) ignoreBuildingIds.push(o.garrison.buildingId);
     if (e.garrison) ignoreBuildingIds.push(e.garrison.buildingId);
+    const hasOpts = ignoreBuildingIds.length > 0 || this.smokeVolumes.length > 0;
     return this.map.sightline(
       o.pos,
       this.unitEyeHeight(o),
       e.pos,
       this.unitEyeHeight(e),
-      ignoreBuildingIds.length > 0 ? { ignoreBuildingIds } : undefined,
+      hasOpts
+        ? {
+            ...(ignoreBuildingIds.length > 0 ? { ignoreBuildingIds } : {}),
+            ...(this.smokeVolumes.length > 0 ? { dynamicVolumes: this.smokeVolumes } : {}),
+          }
+        : undefined,
     );
   }
 
@@ -1427,6 +1910,9 @@ export class World {
     yieldSuppression = 45,
     blastHeightOffset = 0,
     by?: Unit,
+    artilleryAmmo: ArtilleryAmmoType = blastHeightOffset > 0 ? "HE_Airburst" : "HE_Impact",
+    fromPos?: Vec,
+    fromZ?: number,
   ) {
     const maxRadius = Math.max(20, d0 * 6);
     let totalDmg = 0;
@@ -1472,11 +1958,13 @@ export class World {
     this.pushShotEvent({
       t: this.t,
       shooterId: by?.id ?? "Artillery",
-      from: { x: blastPos.x - 40, y: blastPos.y },
-      fromZ: groundZ + 120 + blastHeightOffset,
+      from: fromPos ? { ...fromPos } : { x: blastPos.x - 40, y: blastPos.y },
+      fromZ: fromZ ?? groundZ + 120 + blastHeightOffset,
       to: { ...blastPos },
       toZ: groundZ + blastHeightOffset,
       ammo: "HE",
+      artilleryAmmo,
+      blastHeightOffset,
       weaponClass: "heavy_weapon",
       hit: true,
       penetrated: anyPen,
@@ -1534,6 +2022,7 @@ export class World {
         const p = this.get(pid);
         if (p) this.disembark(p);
       }
+      u.fireMission = undefined;
       u.state = "destroyed";
       this.syncRosterCasualtiesFromStrength(u);
       this.emit("destroyed", u, `${u.id} has been destroyed`);
@@ -1604,6 +2093,7 @@ export class World {
 
     if (u.state !== "broken" && !u.embarkedIn && (u.strength < 30 || u.morale < 20)) {
       if (u.garrison) this.vacateBuilding(u);
+      u.fireMission = undefined;
       u.state = "broken";
       u.roe = "return_fire";
       u.order = { kind: "withdraw", dest: u.rally };
@@ -1615,10 +2105,10 @@ export class World {
         this.emit("pinned", u, "pinned down, cannot move");
       }
     } else if (u.state === "pinned" && u.suppression < 30) {
-      u.state = u.order.dest ? "moving" : "holding";
+      u.state = u.order.dest && u.order.kind !== "fire_mission" ? "moving" : "holding";
       this.emit("recovered", u, "no longer pinned, resuming orders");
     }
-    if (!u.embarkedIn && (u.state === "moving" || u.state === "holding") && u.order.dest) {
+    if (!u.embarkedIn && (u.state === "moving" || u.state === "holding") && u.order.dest && u.order.kind !== "fire_mission") {
       const standoff =
         u.order.kind === "attack" &&
         this.alive().some(
@@ -1630,7 +2120,7 @@ export class World {
       u.state = standoff ? "holding" : "moving";
     }
 
-    if (!u.embarkedIn && (u.state === "moving" || u.state === "broken") && u.order.dest) {
+    if (!u.embarkedIn && (u.state === "moving" || u.state === "broken") && u.order.dest && u.order.kind !== "fire_mission") {
       u.settledTicks = 0;
       this.move(u, u.order.dest);
     } else {
@@ -1648,6 +2138,8 @@ export class World {
 
   private move(u: Unit, dest: Vec) {
     if (u.garrison) this.vacateBuilding(u);
+    u.isPositionCalibrated = false;
+    u.fireMission = undefined;
     const d = dist(u.pos, dest);
     const speedMult = this.map.terrainDefAt(u.pos).speedMultiplier;
     const moraleSpeedMult = u.state === "broken" ? 1.0 : 0.65 + 0.35 * (u.morale / 100);

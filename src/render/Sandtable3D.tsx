@@ -18,12 +18,18 @@ const SIDC: Record<"blue" | "red", Record<UnitType, string>> = {
     ifv: "10031000141211020000",
     infantry: "10031000141211000000",
     atgm: "10031000131204000000",
+    artillery: "10031000141303010000",
+    mlrs: "10031000141305000000",
+    recon: "10031000141213000000",
   },
   red: {
     tank: "10061000141205000000",
     ifv: "10061000141211020000",
     infantry: "10061000141211000000",
     atgm: "10061000131204000000",
+    artillery: "10061000141303010000",
+    mlrs: "10061000141305000000",
+    recon: "10061000141213000000",
   },
 };
 
@@ -205,6 +211,32 @@ function createUnitNode(u: Unit): UnitRenderNode {
     const pod = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.85, 1.0), turretMat);
     pod.position.set(0.4, 2.7, 1.9);
     hullGroup.add(chassis, trackL, trackR, turret, autocannon, pod);
+  } else if (u.type === "artillery") {
+    const chassis = new THREE.Mesh(new THREE.BoxGeometry(10.8, 1.9, 5.0), bodyMat);
+    chassis.position.set(0, 1.15, 0);
+    const turret = new THREE.Mesh(new THREE.BoxGeometry(5.6, 1.8, 4.2), turretMat);
+    turret.position.set(-1.4, 2.7, 0);
+    const barrel = new THREE.Mesh(new THREE.BoxGeometry(8.5, 0.45, 0.45), darkMat);
+    barrel.position.set(3.2, 4.2, 0);
+    barrel.rotation.z = 0.42;
+    hullGroup.add(chassis, turret, barrel);
+  } else if (u.type === "mlrs") {
+    const chassis = new THREE.Mesh(new THREE.BoxGeometry(10.5, 1.8, 4.8), bodyMat);
+    chassis.position.set(0, 1.1, 0);
+    const cab = new THREE.Mesh(new THREE.BoxGeometry(3.2, 1.7, 4.2), turretMat);
+    cab.position.set(3.2, 2.5, 0);
+    const launcher = new THREE.Mesh(new THREE.BoxGeometry(5.8, 2.1, 3.8), darkMat);
+    launcher.position.set(-1.6, 3.2, 0);
+    launcher.rotation.z = 0.45;
+    hullGroup.add(chassis, cab, launcher);
+  } else if (u.type === "recon") {
+    const chassis = new THREE.Mesh(new THREE.BoxGeometry(7.6, 1.5, 3.8), bodyMat);
+    chassis.position.set(0, 1.1, 0);
+    const turret = new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.9, 2.4), turretMat);
+    turret.position.set(0.2, 2.2, 0);
+    const mast = new THREE.Mesh(new THREE.BoxGeometry(0.3, 2.6, 0.3), darkMat);
+    mast.position.set(-1.2, 3.2, 0.8);
+    hullGroup.add(chassis, turret, mast);
   } else {
     const count = Math.max(4, u.headcount || 4);
     const geo = new THREE.CylinderGeometry(0.6, 0.75, 2.5, 6);
@@ -262,7 +294,7 @@ function createUnitNode(u: Unit): UnitRenderNode {
   );
   root.add(tether);
 
-  const prefix = u.side === "blue" ? u.id.replace("Alpha ", "A") : u.id.replace("Red ", "R");
+  const prefix = u.id.replace("Alpha ", "A").replace("Blue ", "B").replace("Red ", "R");
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: getUnitTexture(u.side, u.type, prefix), depthTest: false }));
   sprite.position.set(0, 26, 0);
   sprite.scale.set(82, 82, 1);
@@ -360,6 +392,24 @@ function createVfxManager(vfxGroup: THREE.Group) {
   const spawnShot = (ev: CombatShotEvent) => {
     const from = new THREE.Vector3(ev.from.x, ev.fromZ, -ev.from.y);
     const to = new THREE.Vector3(ev.to.x, ev.toZ, -ev.to.y);
+    if (ev.artilleryAmmo) {
+      if (ev.artilleryAmmo === "Smoke") {
+        const sr = ev.smokeRadius ?? 60;
+        spawnBurst(sphereGeo, "#f1f5f9", to, 1.4, 5, sr * 0.65, 0.6, new THREE.Vector3(0, 6, 0));
+        spawnBurst(ringGeo, "#cbd5e1", to, 1.1, 4, sr, 0.65, undefined, true);
+      } else if (ev.artilleryAmmo === "HE_Airburst") {
+        const rScale = Math.max(8, (ev.blastRadius ?? 30) * 0.9);
+        spawnBurst(sphereGeo, "#fef08a", to, 0.45, 3, rScale * 0.45, 0.95);
+        spawnBurst(ringGeo, "#f97316", to, 0.75, 4, rScale * 1.4, 0.9, undefined, true);
+        spawnBurst(boltGeo, "#fbbf24", to.clone().add(new THREE.Vector3(0, -7, 0)), 0.35, 1.5, 2.2, 0.7, new THREE.Vector3(0, -10, 0));
+      } else {
+        const rScale = Math.max(6, (ev.blastRadius ?? 8) * 2.2);
+        spawnBurst(sphereGeo, "#f97316", to, 0.5, 3, rScale * 1.1, 0.95);
+        spawnBurst(ringGeo, "#ef4444", to, 0.65, 2.5, rScale * 2.2, 0.85, undefined, true);
+        spawnBurst(sphereGeo, "#52525b", to, 1.4, 3, rScale * 1.5, 0.55, new THREE.Vector3(0, 10, 0));
+      }
+      return;
+    }
     // 1. Muzzle flash (~0.12s)
     spawnBurst(sphereGeo, "#fde047", from, 0.14, 2.2, 5.0, 0.95);
     spawnBurst(ringGeo, "#fb923c", from, 0.16, 1.5, 7.5, 0.8, undefined, true);
@@ -747,14 +797,19 @@ export const Sandtable3D: React.FC<Props> = (props) => {
     const unitGroup = new THREE.Group();
     const orderGroup = new THREE.Group();
     const contactGroup = new THREE.Group();
+    const indirectGroup = new THREE.Group();
+    const smokeGroup = new THREE.Group();
     const vfxGroup = new THREE.Group();
-    dynGroup.add(unitGroup, orderGroup, contactGroup, vfxGroup);
+    dynGroup.add(unitGroup, orderGroup, contactGroup, indirectGroup, smokeGroup, vfxGroup);
     scene.add(losGroup);
     scene.add(dynGroup);
 
     const unitNodes = new Map<string, UnitRenderNode>();
     const contactNodes = new Map<string, { sprite: THREE.Sprite; key: string }>();
     const vfx = createVfxManager(vfxGroup);
+    const shellGeo = new THREE.SphereGeometry(2.6, 8, 6);
+    const smokeSphereGeo = new THREE.SphereGeometry(1, 14, 10);
+    const smokeMat = new THREE.MeshBasicMaterial({ color: "#e2e8f0", transparent: true, opacity: 0.42, depthWrite: false });
 
     sceneRef.current = { scene, camera, controls, terrainMesh, buildingMesh, floorMeta, losGroup, dynGroup, unitNodes, hoveredIdx: -1 };
 
@@ -948,6 +1003,79 @@ export const Sandtable3D: React.FC<Props> = (props) => {
         }
       }
 
+      // Prune removed units (Debug Deleter)
+      const currentUnitIds = new Set(world.units.map((u) => u.id));
+      for (const [uid, node] of unitNodes) {
+        if (!currentUnitIds.has(uid)) {
+          unitGroup.remove(node.root);
+          orderGroup.remove(node.orderLine);
+          node.root.traverse((obj) => {
+            if (obj instanceof THREE.Mesh || obj instanceof THREE.Line) {
+              obj.geometry.dispose();
+              (obj.material as THREE.Material).dispose();
+            } else if (obj instanceof THREE.Sprite) {
+              obj.material.dispose();
+            }
+          });
+          node.orderLine.geometry.dispose();
+          (node.orderLine.material as THREE.Material).dispose();
+          unitNodes.delete(uid);
+        }
+      }
+
+      // Sync live parabolic indirect arcs & flying shells
+      while (indirectGroup.children.length > 0) {
+        const ch = indirectGroup.children.pop()!;
+        if (ch instanceof THREE.Line) {
+          ch.geometry.dispose();
+          (ch.material as THREE.Material).dispose();
+        } else if (ch instanceof THREE.Mesh) {
+          (ch.material as THREE.Material).dispose();
+        }
+      }
+      for (const p of world.indirectProjectiles) {
+        const shooter = world.get(p.shooterId);
+        const visibleArc = cur.god || !cur.game.aiCommanderEnabled || shooter?.side === "blue" || world.contacts.blue.has(p.shooterId);
+        if (!visibleArc) continue;
+        const arcH = Math.min(260, Math.max(45, Math.hypot(p.to.x - p.from.x, p.to.y - p.from.y) * 0.16));
+        const arcPts: THREE.Vector3[] = [];
+        const segs = 14;
+        for (let s = 0; s <= segs; s++) {
+          const u = s / segs;
+          arcPts.push(new THREE.Vector3(
+            lerp(p.from.x, p.to.x, u),
+            lerp(p.fromZ, p.toZ, u) + Math.sin(u * Math.PI) * arcH,
+            -lerp(p.from.y, p.to.y, u),
+          ));
+        }
+        const arcColor = p.ammo === "Smoke" ? "#cbd5e1" : p.ammo === "HE_Airburst" ? "#fde047" : "#f59e0b";
+        indirectGroup.add(new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(arcPts),
+          new THREE.LineBasicMaterial({ color: arcColor, transparent: true, opacity: 0.55 }),
+        ));
+        const uNow = Math.min(1, Math.max(0, (p.totalFlightTime - p.timeRemaining + alpha) / Math.max(1, p.totalFlightTime)));
+        const shell = new THREE.Mesh(shellGeo, new THREE.MeshBasicMaterial({ color: arcColor }));
+        shell.position.set(
+          lerp(p.from.x, p.to.x, uNow),
+          lerp(p.fromZ, p.toZ, uNow) + Math.sin(uNow * Math.PI) * arcH,
+          -lerp(p.from.y, p.to.y, uNow),
+        );
+        indirectGroup.add(shell);
+      }
+
+      // Sync translucent 3D smoke occlusion spheres
+      while (smokeGroup.children.length > world.smokeVolumes.length) {
+        smokeGroup.remove(smokeGroup.children[smokeGroup.children.length - 1]);
+      }
+      while (smokeGroup.children.length < world.smokeVolumes.length) {
+        smokeGroup.add(new THREE.Mesh(smokeSphereGeo, smokeMat));
+      }
+      world.smokeVolumes.forEach((sv, idx) => {
+        const mesh = smokeGroup.children[idx] as THREE.Mesh;
+        mesh.position.set(sv.center.x, (sv.minZ ?? map.elevationAt(sv.center)) + sv.height * 0.45, -sv.center.y);
+        mesh.scale.set(sv.radius, sv.height * 0.85, sv.radius);
+      });
+
       // Sync fog-of-war enemy contacts (when God mode is OFF)
       const activeContactIds = new Set<string>();
       if (!cur.god) {
@@ -1016,6 +1144,14 @@ export const Sandtable3D: React.FC<Props> = (props) => {
     return () => {
       cancelAnimationFrame(raf);
       vfx.dispose();
+      shellGeo.dispose();
+      smokeSphereGeo.dispose();
+      smokeMat.dispose();
+      while (indirectGroup.children.length > 0) {
+        const ch = indirectGroup.children.pop()!;
+        if (ch instanceof THREE.Line) { ch.geometry.dispose(); (ch.material as THREE.Material).dispose(); }
+        else if (ch instanceof THREE.Mesh) { (ch.material as THREE.Material).dispose(); }
+      }
       for (const n of unitNodes.values()) {
         n.root.traverse((obj) => {
           if (obj instanceof THREE.Mesh || obj instanceof THREE.Line) {
@@ -1098,7 +1234,10 @@ export const Sandtable3D: React.FC<Props> = (props) => {
           if (blockedYet) {
             r = 0.55; g = 0.12; b = 0.12;
           } else {
-            const res = map.sightline(losObserver.pos, losObserver.eyeHeight, { x: px, y: py }, 1.5, { stepMeters: 25 });
+            const res = map.sightline(losObserver.pos, losObserver.eyeHeight, { x: px, y: py }, 1.5, {
+              stepMeters: 25,
+              dynamicVolumes: propsRef.current.game.world.smokeVolumes,
+            });
             if (res.blocked || res.transmittance < 0.02) {
               blockedYet = true;
               r = 0.94; g = 0.27; b = 0.27; // T = 0 (hard block red)

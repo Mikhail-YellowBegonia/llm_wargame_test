@@ -3,7 +3,7 @@ import { createDeepSeek } from "@ai-sdk/deepseek";
 import { AgentLog, createGame, Game } from "../game";
 import { clock } from "../perception/sitrep";
 import { COMPANY, PLAYER } from "../sim/scenario";
-import { getMoraleTier, isCowering, MoraleEventKind, MoraleTier, OrderKind, Roe, STATS } from "../sim/world";
+import { ArtilleryAmmoType, getMoraleTier, isCowering, MoraleEventKind, MoraleTier, OrderKind, Roe, Side, STATS, UnitType } from "../sim/world";
 import { LosObserver, Sandtable3D, SimClockState } from "../render/Sandtable3D";
 import { Building, BuildingFloor, MobilityClass, UnitTrait, Vec } from "../sim/map";
 
@@ -40,6 +40,8 @@ const KEY_STORAGE = "wargame_deepseek_key";
 const metaEnv = (import.meta as unknown as { env: { DEV?: boolean; WARGAME_MODEL?: string } }).env;
 const MOBILITIES: readonly MobilityClass[] = ["foot", "wheeled", "tracked", "amphibious"];
 const TRAITS: readonly UnitTrait[] = ["infantry", "vehicle", "armored", "low_profile", "tall_profile"];
+const SPAWN_TYPES: readonly UnitType[] = ["tank", "ifv", "infantry", "atgm", "artillery", "mlrs", "recon"];
+const FIRE_AMMO_TYPES: readonly ArtilleryAmmoType[] = ["HE_Impact", "HE_Airburst", "Smoke"];
 
 export const App: React.FC = () => {
   const [, setTick] = useState(0);
@@ -53,7 +55,11 @@ export const App: React.FC = () => {
   const [god, setGod] = useState(false);
   const [aiCommander, setAiCommander] = useState(true);
   const [selectedUnitId, setSelectedUnitId] = useState<string | null>(null);
-  const [pendingOrder, setPendingOrder] = useState<"move" | "attack" | "withdraw" | "garrison" | null>(null);
+  const [pendingOrder, setPendingOrder] = useState<"move" | "attack" | "withdraw" | "garrison" | "fire_mission" | null>(null);
+  const [fireAmmo, setFireAmmo] = useState<ArtilleryAmmoType>("HE_Impact");
+  const [spawnMode, setSpawnMode] = useState(false);
+  const [spawnSide, setSpawnSide] = useState<Side>("blue");
+  const [spawnType, setSpawnType] = useState<UnitType>("artillery");
   const [commandNote, setCommandNote] = useState<string | null>(null);
   const [showDebug, setShowDebug] = useState(false);
   const [markerMode, setMarkerMode] = useState(false);
@@ -144,7 +150,7 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setPendingOrder(null);
+      if (e.key === "Escape") { setPendingOrder(null); setSpawnMode(false); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -214,9 +220,25 @@ export const App: React.FC = () => {
       setLosObserver({ pos, eyeHeight: observerEyeH, label: `Terrain ${grid4} (+${observerEyeH}m)` });
       return;
     }
+    if (!inspectorMode && !markerMode && spawnMode) {
+      const spawned = game.spawnUnit(spawnSide, spawnType, pos);
+      if (spawnSide === "red" && !god) setGod(true);
+      setSelectedUnitId(spawned.id);
+      setPendingOrder(null);
+      setCommandNote(`Spawned ${spawned.id} (${spawnType}) at ${grid4}`);
+      setTick((t) => t + 1);
+      return;
+    }
     if (!inspectorMode && !markerMode && selectedUnitId && pendingOrder && pendingOrder !== "garrison") {
-      const res = game.directCommand(selectedUnitId, { kind: pendingOrder, dest: pos, destName: grid4 });
-      setCommandNote(res === "ok" ? `${selectedUnitId}: ${pendingOrder} → ${grid4}` : res);
+      const orderPayload = pendingOrder === "fire_mission"
+        ? { kind: pendingOrder, dest: pos, destName: grid4, ammoType: fireAmmo }
+        : { kind: pendingOrder, dest: pos, destName: grid4 };
+      const res = game.directCommand(selectedUnitId, orderPayload);
+      setCommandNote(
+        res === "ok"
+          ? `${selectedUnitId}: ${pendingOrder === "fire_mission" ? `fire_mission (${fireAmmo})` : pendingOrder} → ${grid4}`
+          : res,
+      );
       setPendingOrder(null);
       setTick((t) => t + 1);
       return;
@@ -333,7 +355,7 @@ export const App: React.FC = () => {
         god={god}
         markerMode={markerMode}
         inspectorMode={inspectorMode}
-        orderTargetMode={!!pendingOrder && pendingOrder !== "garrison"}
+        orderTargetMode={(!!pendingOrder && pendingOrder !== "garrison") || spawnMode}
         allowBuildingSelect={
           inspectorMode ||
           (!!selectedUnit && selectedUnit.traits.includes("infantry") && (!pendingOrder || pendingOrder === "garrison"))
@@ -346,7 +368,7 @@ export const App: React.FC = () => {
         onHoverPos={setHoverPos}
         onSelectBuilding={handleSelectBuilding}
         onSelectUnit={handleSelectUnit}
-        onCancelOrder={() => setPendingOrder(null)}
+        onCancelOrder={() => { setPendingOrder(null); setSpawnMode(false); }}
       />
 
       {/* Top-left flex column stack: prevents top bar wrap from overlapping left HUD card */}
@@ -626,6 +648,34 @@ export const App: React.FC = () => {
                 : `Status & contacts synced at ${clock(picture.syncedAt)} (${world.t - picture.syncedAt}s ago)`}
         </div>
 
+        {/* Debug Unit Spawner */}
+        <div style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap", marginBottom: 8, padding: "5px 6px", background: "rgba(235, 229, 215, 0.7)", borderRadius: 4, border: "1px solid #d4cbb8" }}>
+          <select
+            value={spawnSide}
+            onChange={(e) => setSpawnSide(e.target.value as Side)}
+            style={{ fontSize: 11, padding: "2px 4px", borderRadius: 3, border: "1px solid #9e9381", background: "#fffdf8" }}
+          >
+            <option value="blue">Blue</option>
+            <option value="red">Red</option>
+          </select>
+          <select
+            value={spawnType}
+            onChange={(e) => setSpawnType(e.target.value as UnitType)}
+            style={{ fontSize: 11, padding: "2px 4px", borderRadius: 3, border: "1px solid #9e9381", background: "#fffdf8", flex: 1, minWidth: 80 }}
+          >
+            {SPAWN_TYPES.map((t) => (
+              <option key={t} value={t}>{t}</option>
+            ))}
+          </select>
+          <button
+            style={{ ...btnStyle(spawnMode), fontSize: 11, padding: "2px 7px" }}
+            onClick={() => { setSpawnMode((s) => !s); setPendingOrder(null); }}
+            title="Click 3D terrain to spawn unit (Esc/right-click cancels)"
+          >
+            {spawnMode ? "Spawning…" : "+ Spawn"}
+          </button>
+        </div>
+
         {unitRows.length === 0 ? (
           <div style={{ color: "#786f60", fontStyle: "italic", padding: "6px 0" }}>
             Radio Alpha 6 to receive unit status report.
@@ -712,16 +762,32 @@ export const App: React.FC = () => {
           <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid #cfc6b4", display: "flex", flexDirection: "column", gap: 6 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <strong style={{ fontSize: 12 }}>DIRECT ORDER: {selectedUnit.id}</strong>
-              <button style={{ ...btnStyle(), padding: "1px 6px" }} onClick={() => { setSelectedUnitId(null); setPendingOrder(null); }}>
-                ×
-              </button>
+              <div style={{ display: "flex", gap: 4 }}>
+                <button
+                  style={{ ...btnStyle(), padding: "1px 6px", background: "#fee2e2", color: "#991b1b", borderColor: "#fca5a5" }}
+                  onClick={() => {
+                    const delId = selectedUnit.id;
+                    game.deleteUnit(delId);
+                    setSelectedUnitId(null);
+                    setPendingOrder(null);
+                    setCommandNote(`Deleted ${delId}`);
+                    setTick((t) => t + 1);
+                  }}
+                  title="Delete unit cleanly from world"
+                >
+                  Delete
+                </button>
+                <button style={{ ...btnStyle(), padding: "1px 6px" }} onClick={() => { setSelectedUnitId(null); setPendingOrder(null); }}>
+                  ×
+                </button>
+              </div>
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
               {(["move", "attack", "withdraw"] as const).map((kind) => (
                 <button
                   key={kind}
                   style={btnStyle(pendingOrder === kind)}
-                  onClick={() => { setPendingOrder((p) => (p === kind ? null : kind)); setCommandNote(null); }}
+                  onClick={() => { setSpawnMode(false); setPendingOrder((p) => (p === kind ? null : kind)); setCommandNote(null); }}
                 >
                   {kind[0].toUpperCase() + kind.slice(1)}
                 </button>
@@ -729,9 +795,17 @@ export const App: React.FC = () => {
               {selectedUnit.traits.includes("infantry") && (
                 <button
                   style={btnStyle(pendingOrder === "garrison")}
-                  onClick={() => { setPendingOrder((p) => (p === "garrison" ? null : "garrison")); setCommandNote(null); }}
+                  onClick={() => { setSpawnMode(false); setPendingOrder((p) => (p === "garrison" ? null : "garrison")); setCommandNote(null); }}
                 >
                   Garrison
+                </button>
+              )}
+              {(selectedUnit.type === "artillery" || selectedUnit.type === "mlrs") && (
+                <button
+                  style={btnStyle(pendingOrder === "fire_mission")}
+                  onClick={() => { setSpawnMode(false); setPendingOrder((p) => (p === "fire_mission" ? null : "fire_mission")); setCommandNote(null); }}
+                >
+                  Fire Mission
                 </button>
               )}
               <button
@@ -746,11 +820,27 @@ export const App: React.FC = () => {
                 Hold
               </button>
             </div>
+            {(selectedUnit.type === "artillery" || selectedUnit.type === "mlrs") && (
+              <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 10.5, color: "#524a3e" }}>Shell:</span>
+                {FIRE_AMMO_TYPES.map((am) => (
+                  <button
+                    key={am}
+                    style={{ ...btnStyle(fireAmmo === am), fontSize: 10, padding: "2px 6px" }}
+                    onClick={() => setFireAmmo(am)}
+                  >
+                    {am === "HE_Impact" ? "HE Impact" : am === "HE_Airburst" ? "Airburst" : "Smoke"}
+                  </button>
+                ))}
+              </div>
+            )}
             {pendingOrder && (
               <div style={{ fontSize: 10.5, color: "#1d4ed8", fontWeight: 600 }}>
                 {pendingOrder === "garrison"
                   ? "Click a highlighted 3D building to select floor (Esc/right-click cancels)."
-                  : `Click terrain on 3D map to dispatch ${pendingOrder.toUpperCase()} (Esc/right-click cancels).`}
+                  : pendingOrder === "fire_mission"
+                    ? `Click terrain on 3D map for ${fireAmmo} Fire Mission (Esc/right-click cancels).`
+                    : `Click terrain on 3D map to dispatch ${pendingOrder.toUpperCase()} (Esc/right-click cancels).`}
               </div>
             )}
             <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
@@ -829,7 +919,17 @@ export const App: React.FC = () => {
 
             {/* Live Selected-Unit Telemetry */}
             <div style={{ background: "rgba(235,229,215,0.6)", padding: 6, borderRadius: 4, fontSize: 10.5, fontFamily: "ui-monospace, monospace" }}>
-              <div><strong>Telemetry</strong> · mob: {selectedUnit.mobility}</div>
+              <div><strong>Telemetry</strong> · mob: {selectedUnit.mobility} · obs: {selectedTelemetry.hasObserver ? "YES" : "no"}</div>
+              {(selectedUnit.type === "artillery" || selectedUnit.type === "mlrs") && (
+                <div>
+                  posCal: <b style={{ color: selectedTelemetry.isPositionCalibrated ? "#15803d" : "#786f60" }}>{selectedTelemetry.isPositionCalibrated ? "CALIBRATED" : "uncalibrated"}</b>
+                  {selectedTelemetry.fireMission && (
+                    <span>
+                      {" "}· FM: <b>{selectedTelemetry.fireMission.effectiveAmmo}</b> ({selectedTelemetry.fireMission.phase.toUpperCase()} {selectedTelemetry.fireMission.rangingFired}/{selectedTelemetry.fireMission.rangingNeeded}, disp {Math.round(selectedTelemetry.fireMission.dispersionRadius)}m, salvo {selectedTelemetry.fireMission.salvoRemaining})
+                    </span>
+                  )}
+                </div>
+              )}
               <div>
                 morale: <b>{Math.round(selectedTelemetry.morale)}</b> ({selectedTelemetry.moraleTier}
                 {selectedTelemetry.cowering ? ", Cowering" : ""}) · sup: <b>{Math.round(selectedTelemetry.suppression)}%</b>
