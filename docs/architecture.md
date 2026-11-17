@@ -23,9 +23,10 @@ Simulation World (src/sim/)
 
 | Path | Responsibility | Dependencies |
 | :--- | :--- | :--- |
-| `src/sim/map.ts` | 10m multi-channel geo-substrate (`elevationGrid`, `slopeGrid`, `terrainGrid`, `buildingIdGrid`), 6D `TERRAIN_DEFS` registry (11 terrain IDs), `RoadNetwork`, multi-story `Building`/`BuildingFloor` (`canGarrisonFloor`, `gutBuildingFloor`), 3D Beer-Lambert `sightline()` engine, and legacy 50m compatibility views. | `simplex-noise` |
+| `src/sim/map.ts` | 10m multi-channel geo-substrate (`elevationGrid`, `slopeGrid`, `terrainGrid`, `buildingIdGrid`), `GameMap.fromAsset()` static loader, 6D `TERRAIN_DEFS` registry (11 terrain IDs), `RoadNetwork`, multi-story `Building`/`BuildingFloor` (`canGarrisonFloor`, `gutBuildingFloor`), 3D Beer-Lambert `sightline()` engine, and legacy 50m compatibility views. | `simplex-noise` |
 | `src/sim/world.ts` | Platoon entities (`tank`, `ifv`, `infantry`, `atgm`), spotting, firepower/cover/suppression combat model, platoon FSM (`holding`, `moving`, `pinned`, `broken`, `destroyed`; `attack` orders halt at 75% standoff range when target is in LOS), event bus. | `src/sim/map.ts` |
-| `src/sim/scenario.ts` | "Operation Kessel" map authoring, initial OOB, scripted red reserve trigger, win/loss check. | `src/sim/*` |
+| `src/sim/scenario.ts` | Fulda Gap — Point Alpha (Rasdorf–Geisa) scenario loading `src/sim/maps/fulda-point-alpha.json`, initial OOB, scripted red reserve trigger, win/loss check. | `src/sim/*` |
+| `scripts/build-map.ts` | Offline GIS compiler ingesting Point Alpha OSM XML, Hessen 1m LiDAR DGM1 WCS, and Copernicus DEM fallback into compact 10m `src/sim/maps/fulda-point-alpha.json`. | `geotiff`, `src/sim/map.ts` |
 | `src/comms/radio.ts` | `RadioNet`: single-channel airtime queue (`1 + words/8` sec), delivery callbacks, optional structured payload (`data`). | None |
 | `src/perception/sitrep.ts` | Converts `World` into text that `Alpha 6` is allowed to know (`companySitrep` with terrain cover, suppression %, engaged target, and in-flight orders; `describeLocation`; `placesBrief`). | `src/sim/*` |
 | `src/perception/player.ts` | `PlayerPicture`: enforces player information rules (30s friendly position datalink, unit status + enemy contacts synced only on `Steel 6 <-> Alpha 6` radio delivery, company orders intercepted after 10s). | `src/sim/*` |

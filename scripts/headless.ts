@@ -84,8 +84,44 @@ console.log("Phase 1A verification checks passed.");
 
 const seed = Number(process.argv[2] ?? 7);
 const { world, map, script, outcome } = buildScenario(seed);
-const kessel = map.resolve("Kessel")!;
-for (const u of world.alive("blue")) world.command(u, { kind: "attack", dest: kessel, destName: "Kessel" });
+
+function verifyPhase1B(loaded: GameMap) {
+  assert.equal(loaded.width, 4000);
+  assert.equal(loaded.depth, 4000);
+  assert.equal(loaded.fineCellSize, 10);
+
+  let hedgerowCount = 0, lightForestCount = 0, denseForestCount = 0;
+  let streamCell: { x: number; y: number } | undefined;
+  let waterCell: { x: number; y: number } | undefined;
+  for (let fr = 0; fr < loaded.fineRows; fr++) {
+    for (let fc = 0; fc < loaded.fineCols; fc++) {
+      const p = { x: (fc + 0.5) * loaded.fineCellSize, y: (fr + 0.5) * loaded.fineCellSize };
+      const tid = loaded.terrainIdAt(p);
+      if (tid === "hedgerow") hedgerowCount++;
+      else if (tid === "light_forest") lightForestCount++;
+      else if (tid === "dense_forest") denseForestCount++;
+      else if (tid === "shallow_stream" && !streamCell && loaded.slopeAt(p) <= 20) streamCell = p;
+      else if (tid === "deep_water" && !waterCell && loaded.slopeAt(p) <= 20) waterCell = p;
+    }
+  }
+  assert.ok(hedgerowCount > 0 && lightForestCount > 0 && denseForestCount > 0, "Tree/hedgerow normalization missing");
+  assert.ok(streamCell, "Expected shallow_stream cells from OSM streams/ditches");
+  assert.equal(loaded.isPassable(streamCell, "foot"), true, "shallow_stream must be foot-passable");
+  assert.equal(loaded.isPassable(streamCell, "wheeled"), false, "shallow_stream must block wheeled");
+  assert.ok(waterCell, "Expected deep_water cells from OSM Ulster river/water");
+  assert.equal(loaded.isPassable(waterCell, "foot"), false);
+  assert.equal(loaded.isPassable(waterCell, "amphibious"), true);
+
+  const multi = loaded.buildings.find((b) => b.floors.length >= 2);
+  assert.ok(multi && loaded.buildings.length > 100, "Expected populated multi-story OSM buildings");
+  assert.equal(loaded.buildingAt(multi.center)?.id, multi.id, "buildingIdGrid must index building centers");
+}
+
+verifyPhase1B(map);
+console.log("Phase 1B Fulda Gap asset checks passed.");
+
+const objective = map.resolve("Geisa")!;
+for (const u of world.alive("blue")) world.command(u, { kind: "attack", dest: objective, destName: "Geisa" });
 
 const fmt = (t: number) => `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
 world.on((e) => console.log(`[${fmt(e.t)}] ${e.unit}: ${e.text}`));
