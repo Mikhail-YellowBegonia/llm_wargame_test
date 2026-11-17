@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { GameMap, TERRAIN_DEFS, TERRAIN_IDS } from "../src/sim/map";
 import { buildScenario } from "../src/sim/scenario";
-import { World } from "../src/sim/world";
+import { World, evaluateHePenetration } from "../src/sim/world";
 import { asciiMap } from "../src/render/ascii";
 
 function verifyPhase1A() {
@@ -220,6 +220,198 @@ function verifyPhase2A() {
 
 verifyPhase2A();
 console.log("Phase 2A spotting, mobility & garrison checks passed.");
+
+function verifyPhase2B() {
+  // 1. Directional KE/CE Armor: Frontal 30mm AP bounces off tank front (0 damage + suppression), flanking rear penetrates
+  const armMap = new GameMap(2000, 1000, 1, { empty: true });
+  const armWorld = new World(armMap, 10);
+  const shooterIfv = armWorld.add({
+    id: "FlankIFV",
+    side: "blue",
+    type: "ifv",
+    pos: { x: 800, y: 500 },
+    weapons: [
+      {
+        id: "autocannon_30mm",
+        name: "30mm Autocannon",
+        ammo: "AP",
+        pen: 7,
+        damage: 10,
+        suppression: 12,
+        range: 1500,
+        reloadSec: 1,
+        cooldown: 0,
+        accuracy: 1.0,
+        weaponClass: "light_weapon",
+        muzzleSignature: 1.35,
+      },
+    ],
+  });
+  // Target tank facing West (Math.PI) toward IFV at x=800 -> frontal aspect
+  const targetTank = armWorld.add({
+    id: "TargetMBT",
+    side: "red",
+    type: "tank",
+    pos: { x: 1100, y: 500 },
+    heading: Math.PI,
+    roe: "hold_fire",
+  });
+  for (let i = 0; i < 6; i++) armWorld.step();
+  assert.equal(targetTank.strength, 100, "Frontal 30mm AP (pen <= 7) must deal 0 HP damage to tank front KE 16");
+  assert.ok(targetTank.suppression > 0, "Non-penetrating hits must still apply suppression");
+
+  // Rotate target tank to face East (0) so IFV at x=800 strikes rear KE 3
+  targetTank.heading = 0;
+  for (let i = 0; i < 6; i++) armWorld.step();
+  assert.ok(targetTank.strength < 100, "Flanking rear 30mm AP must penetrate tank rear KE 3");
+  assert.ok(shooterIfv.state !== "destroyed");
+
+  // 2. HE Inverse-Square Patch: Pen_contact / (1 + (d_z / d_0)^2) evaluated vs nearest of 4 armor zones
+  const tankArmor = targetTank.armor;
+  // Blast 1.5m above tank roof (top KE = 2): d_top = 1.5m -> Pen_HE = 6 / (1 + (1.5/2)^2) = 3.84 >= 2
+  const airburstPen = evaluateHePenetration(tankArmor, { x: 500, y: 500 }, 0, { x: 500, y: 500 }, 4.0, 6, 2.0, true);
+  assert.equal(airburstPen.penetrated, true, "HE burst above roof must penetrate weak top KE 2");
+  assert.equal(airburstPen.bestZone, "top");
+
+  // Blast 1m behind rear (rear KE = 3): d_rear = 1m -> Pen_HE = 6 / (1 + (1/2)^2) = 4.8 >= 3
+  const rearNearMiss = evaluateHePenetration(tankArmor, { x: 500, y: 500 }, 0, { x: 495.8, y: 500 }, 0, 6, 2.0, true);
+  assert.equal(rearNearMiss.penetrated, true, "Close rear HE near-miss must penetrate tank rear KE 3");
+  assert.equal(rearNearMiss.bestZone, "rear");
+
+  // Distant blast 12m in front (front KE = 16): fails all zones
+  const farMiss = evaluateHePenetration(tankArmor, { x: 500, y: 500 }, 0, { x: 515.2, y: 500 }, 0, 6, 2.0, true);
+  assert.equal(farMiss.penetrated, false, "Distant HE blast must fail to penetrate armor");
+
+  // 3. Three-tier ownPerception accuracy scaling: none < contact < visual
+  const accMap = new GameMap(2000, 1000, 1, { empty: true });
+  const accWorld = new World(accMap, 11);
+  const gunTank = accWorld.add({ id: "GunTank", side: "blue", type: "tank", pos: { x: 400, y: 500 } });
+  const enemyTarget = accWorld.add({ id: "EnemyTgt", side: "red", type: "ifv", pos: { x: 1000, y: 500 }, roe: "hold_fire" });
+  const slot = gunTank.weapons[0];
+
+  gunTank.ownPerception.set(enemyTarget.id, "none");
+  const pNone = accWorld.computeSlotHitChance(gunTank, slot, enemyTarget, 600);
+  gunTank.ownPerception.set(enemyTarget.id, "contact");
+  const pContact = accWorld.computeSlotHitChance(gunTank, slot, enemyTarget, 600);
+  gunTank.ownPerception.set(enemyTarget.id, "visual");
+  const pVisual = accWorld.computeSlotHitChance(gunTank, slot, enemyTarget, 600);
+  assert.ok(pNone < pContact && pContact < pVisual, `ownPerception accuracy must scale monotonically (${pNone} < ${pContact} < ${pVisual})`);
+
+  // 4. Vehicle mutexGroup concurrency lock & Building armor structural resistance
+  const mtxWorld = new World(accMap, 12);
+  const mtxIfv = mtxWorld.add({ id: "MtxIFV", side: "blue", type: "ifv", pos: { x: 400, y: 500 } });
+  const enemyMbt = mtxWorld.add({ id: "EnemyMBT", side: "red", type: "tank", pos: { x: 1200, y: 500 }, roe: "hold_fire" });
+  mtxWorld.step();
+  assert.ok(mtxIfv.mutexCooldowns.get("turret_loader")! > 0, "Firing TOW/ATGM must lock turret_loader mutexGroup");
+  assert.equal(mtxIfv.weapons.find((w) => w.id === "autocannon_30mm")!.cooldown, 0, "Locked autocannon must not fire while turret_loader mutex holds");
+  assert.ok(enemyMbt.state !== "destroyed");
+
+  // Building armor check: non-penetrating rifle fire deals 0 integrity loss, penetrating tank HE guts floor
+  const bldMap = new GameMap(1000, 1000, 1, { empty: true });
+  bldMap.addBuilding({
+    id: "fort_bld",
+    footprint: [{ x: 490, y: 490 }, { x: 510, y: 490 }, { x: 510, y: 510 }, { x: 490, y: 510 }],
+    center: { x: 500, y: 500 },
+    groundElevation: 0,
+    roofHeight: 5,
+    armor: { ke: 4, ce: 6 },
+    floors: [
+      { level: 1, elevationOffset: 1.5, capacity: 12, integrity: 20, state: "intact", occupants: [], modifiers: { damageMult: 0.4, signatureMult: 0.5 } },
+    ],
+  });
+  const bldWorld = new World(bldMap, 13);
+  const garrisonSquad = bldWorld.add({ id: "GarInf", side: "red", type: "infantry", pos: { x: 500, y: 500 }, roe: "hold_fire" });
+  bldWorld.garrisonFloor(garrisonSquad, "fort_bld", 1);
+  const rifleSquad = bldWorld.add({
+    id: "RifleAtk",
+    side: "blue",
+    type: "infantry",
+    pos: { x: 400, y: 500 },
+    subRoster: {
+      personnel: { rifleman: 4, mg_specialist: 0, at_specialist: 0, marksman: 0, engineer: 0 },
+      weapons: [1, 2, 3, 4].map((i) => ({
+        id: `r_${i}`,
+        isSpecial: false,
+        requiredRole: "rifleman" as const,
+        abandonPriority: 99,
+        unskilledPenalty: 1,
+        cooldown: 0,
+        weapon: {
+          id: `r_${i}`,
+          name: "Rifle",
+          ammo: "AP" as const,
+          pen: 1,
+          damage: 3,
+          suppression: 3,
+          range: 400,
+          reloadSec: 1,
+          accuracy: 1,
+          weaponClass: "small_arms" as const,
+          muzzleSignature: 0.9,
+        },
+      })),
+      abandonedWeapons: [],
+    },
+  });
+  bldWorld.step();
+  assert.equal(bldMap.buildings[0].floors[0].integrity, 20, "Non-penetrating rifle AP (pen 1 < KE 4) must deal 0 integrity damage");
+  rifleSquad.state = "destroyed";
+
+  const heTank = bldWorld.add({
+    id: "HETank",
+    side: "blue",
+    type: "tank",
+    pos: { x: 350, y: 500 },
+    weapons: [
+      {
+        id: "120mm_he",
+        name: "120mm HE",
+        ammo: "HE",
+        pen: 8,
+        d0: 4,
+        damage: 60,
+        suppression: 30,
+        range: 2000,
+        reloadSec: 1,
+        cooldown: 0,
+        accuracy: 1.0,
+        weaponClass: "heavy_weapon",
+        muzzleSignature: 1.6,
+      },
+    ],
+  });
+  bldWorld.step();
+  assert.equal(bldMap.buildings[0].floors[0].state, "gutted", "Penetrating HE must deplete floor integrity and gutBuildingFloor()");
+  assert.equal(garrisonSquad.garrison, undefined, "Gutted floor must evict occupying squad");
+  assert.ok(heTank.state !== "destroyed");
+
+  // 5. InfantrySubRoster casualty weapon takeover
+  const infWorld = new World(accMap, 14);
+  const squad = infWorld.add({ id: "TakeoverInf", side: "blue", type: "infantry", pos: { x: 200, y: 200 } });
+  const initialAssign = infWorld.assignInfantryWeapons(squad);
+  assert.equal(initialAssign.find((a) => a.slot.id === "at_launcher")?.crossManned, false);
+
+  // Kill at_specialist -> surviving rifleman drops a rifle to retain AT launcher with unskilledPenalty
+  assert.equal(infWorld.inflictRosterCasualty(squad, "at_specialist", 1), true);
+  assert.equal(squad.headcount, 7);
+  assert.ok(squad.subRoster!.abandonedWeapons.some((id) => id.startsWith("rifle_")), "Primary rifle must be dropped first");
+  const crossAssign = infWorld.assignInfantryWeapons(squad);
+  const atAfterLoss = crossAssign.find((a) => a.slot.id === "at_launcher");
+  assert.ok(atAfterLoss, "AT launcher must be retained");
+  assert.equal(atAfterLoss.crossManned, true, "Rifleman must cross-man AT launcher");
+  assert.equal(atAfterLoss.operatorRole, "rifleman");
+  assert.ok(atAfterLoss.efficiency < 1, "Cross-manning must apply unskilledPenalty");
+
+  // Reduce headcount to 1 (below 2 special weapons) -> MG (abandonPriority 2) dropped, AT (abandonPriority 1) kept
+  infWorld.inflictRosterCasualty(squad, "mg_specialist", 1);
+  infWorld.inflictRosterCasualty(squad, "rifleman", 5);
+  assert.equal(squad.headcount, 1);
+  assert.ok(squad.subRoster!.abandonedWeapons.includes("lmg"), "Higher abandonPriority special weapon (MG=2) must be abandoned before AT=1");
+  assert.ok(squad.subRoster!.weapons.some((w) => w.id === "at_launcher"), "Lowest abandonPriority AT=1 must remain");
+}
+
+verifyPhase2B();
+console.log("Phase 2B accuracy, armor, HE inverse-square & infantry takeover checks passed.");
 
 const objective = map.resolve("Geisa")!;
 for (const u of world.alive("blue")) world.command(u, { kind: "attack", dest: objective, destName: "Geisa" });

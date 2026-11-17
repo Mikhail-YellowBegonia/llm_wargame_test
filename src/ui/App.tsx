@@ -770,6 +770,43 @@ export const App: React.FC = () => {
                   ? "none"
                   : selectedTelemetry.ownPerception.map((p) => `${p.targetId}:${p.level}`).join(", ")}
               </div>
+              <div style={{ marginTop: 3, borderTop: "1px dashed #c2b8a3", paddingTop: 3 }}>
+                <strong>Armor (KE/CE):</strong>{" "}
+                F {selectedTelemetry.armor.front.ke}/{selectedTelemetry.armor.front.ce} ·
+                S {selectedTelemetry.armor.side.ke}/{selectedTelemetry.armor.side.ce} ·
+                R {selectedTelemetry.armor.rear.ke}/{selectedTelemetry.armor.rear.ce} ·
+                T {selectedTelemetry.armor.top.ke}/{selectedTelemetry.armor.top.ce}
+              </div>
+              <div style={{ marginTop: 2 }}>
+                <strong>Weapons:</strong>{" "}
+                {selectedTelemetry.weaponSlots.map((w) => (
+                  <span key={w.id} style={{ display: "inline-block", marginRight: 5 }}>
+                    {w.id}[{w.ammo}
+                    {w.mutexLocked ? " LOCKED" : w.cooldown > 0 ? ` ${w.cooldown}s` : " RDY"}
+                    {w.mutexGroup ? `/${w.mutexGroup}` : ""}]
+                  </span>
+                ))}
+              </div>
+              {selectedTelemetry.subRoster && (
+                <div style={{ marginTop: 2 }}>
+                  <strong>SubRoster:</strong>{" "}
+                  R:{selectedTelemetry.subRoster.personnel.rifleman} MG:{selectedTelemetry.subRoster.personnel.mg_specialist} AT:{selectedTelemetry.subRoster.personnel.at_specialist}
+                  {selectedTelemetry.subRoster.assignments.some((a) => a.crossManned) && (
+                    <div style={{ color: "#b45309" }}>
+                      Cross-manned:{" "}
+                      {selectedTelemetry.subRoster.assignments
+                        .filter((a) => a.crossManned)
+                        .map((a) => `${a.weaponId} by ${a.role} (${Math.round(a.efficiency * 100)}%)`)
+                        .join(", ")}
+                    </div>
+                  )}
+                  {selectedTelemetry.subRoster.abandoned.length > 0 && (
+                    <div style={{ color: "#786f60" }}>
+                      Dropped: {selectedTelemetry.subRoster.abandoned.join(", ")}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}
