@@ -245,12 +245,20 @@ export interface BuildingFloor {
   modifiers: CombatModifiers;
 }
 
+export interface ArmorValue {
+  ke: number;
+  ce: number;
+}
+
+export const DEFAULT_BUILDING_ARMOR: ArmorValue = { ke: 4, ce: 6 };
+
 export interface Building {
   id: string;
   footprint: Vec[];
   center: Vec;
   groundElevation: number;
   roofHeight: number;
+  armor?: ArmorValue;
   floors: BuildingFloor[];
 }
 
@@ -521,6 +529,7 @@ export class GameMap {
 
   // ---- building topology & floor operations ----
   addBuilding(b: Building): Building {
+    if (!b.armor) b.armor = { ...DEFAULT_BUILDING_ARMOR };
     const bIdx = this.buildings.length;
     this.buildings.push(b);
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
