@@ -24,13 +24,19 @@ export function asciiMap(world: World, side: Side, god = false, friendlies: Pick
   for (const pl of map.places) put(pl.pos.x, pl.pos.y, "*");
   for (const u of friendlies) put(u.pos.x, u.pos.y, u.id.slice(-1));
   if (god) for (const u of world.alive(side === "blue" ? "red" : "blue")) put(u.pos.x, u.pos.y, "R");
-  else for (const c of world.contacts[side].values()) put(c.pos.x, c.pos.y, world.t - c.seenAt < 60 ? "E" : "e");
+  else {
+    for (const c of world.contacts[side].values()) {
+      const stale = world.t - c.seenAt >= 60;
+      const ch = c.level === "visual" ? (stale ? "e" : "E") : (stale ? "?" : "C");
+      put(c.pos.x, c.pos.y, ch);
+    }
+  }
 
   const lines = grid.map((row, r) => String(r).padStart(2, "0") + " " + row.join("")).reverse();
   const header = "   " + Array.from({ length: cols }, (_, c) => (c % 5 === 0 ? String(c).padStart(2, "0")[0] : " ")).join("");
   const header2 = "   " + Array.from({ length: cols }, (_, c) => (c % 5 === 0 ? String(c).padStart(2, "0")[1] : " ")).join("");
   const legend = [
-    "Legend: digits=own platoons  E=enemy contact (e=stale)  *=named place  #=town  ♣=forest  ==road  ^=high ground",
+    "Legend: digits=own platoons  E=visual enemy (e=stale)  C=contact (?=stale)  *=named place  #=town  ♣=forest  ==road  ^=high ground",
     "Places: " + map.places.map((p) => `${p.name} [${map.toGrid(p.pos)}]`).join(", "),
   ];
   return [...lines, header, header2, ...legend].join("\n");

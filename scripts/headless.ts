@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { GameMap, TERRAIN_DEFS, TERRAIN_IDS } from "../src/sim/map";
 import { buildScenario } from "../src/sim/scenario";
+import { World } from "../src/sim/world";
 import { asciiMap } from "../src/render/ascii";
 
 function verifyPhase1A() {
@@ -119,6 +120,106 @@ function verifyPhase1B(loaded: GameMap) {
 
 verifyPhase1B(map);
 console.log("Phase 1B Fulda Gap asset checks passed.");
+
+function verifyPhase2A() {
+  // 1. 10m terrain speedMultiplier & isPassable() barriers (deep_water + shallow_stream for wheeled)
+  const mobMap = new GameMap(1000, 1000, 1, { empty: true });
+  mobMap.road({ x: 50, y: 200 }, { x: 400, y: 200 }, "paved_road");
+  mobMap.paint({ x: 350, y: 500 }, 80, "deep_water");
+  mobMap.paint({ x: 350, y: 700 }, 80, "shallow_stream");
+
+  const mobWorld = new World(mobMap, 1);
+  const roadTank = mobWorld.add({ id: "RoadTank", side: "blue", type: "tank", pos: { x: 60, y: 200 } });
+  const openTank = mobWorld.add({ id: "OpenTank", side: "blue", type: "tank", pos: { x: 60, y: 350 } });
+  const waterTank = mobWorld.add({ id: "WaterTank", side: "blue", type: "tank", pos: { x: 200, y: 500 } });
+  const wheelCar = mobWorld.add({ id: "WheelCar", side: "blue", type: "ifv", mobility: "wheeled", pos: { x: 200, y: 700 } });
+
+  mobWorld.command(roadTank, { kind: "move", dest: { x: 300, y: 200 } });
+  mobWorld.command(openTank, { kind: "move", dest: { x: 300, y: 350 } });
+  mobWorld.command(waterTank, { kind: "move", dest: { x: 450, y: 500 } });
+  mobWorld.command(wheelCar, { kind: "move", dest: { x: 450, y: 700 } });
+
+  for (let i = 0; i < 20; i++) mobWorld.step();
+  assert.ok(roadTank.pos.x > openTank.pos.x + 40, "paved_road speedMultiplier (1.5x) must outpace open (1.0x)");
+  assert.notEqual(mobMap.terrainIdAt(waterTank.pos), "deep_water", "Tracked unit must not enter deep_water");
+  assert.notEqual(mobMap.terrainIdAt(wheelCar.pos), "shallow_stream", "Wheeled unit must not enter shallow_stream");
+
+  // 2. Infantry BuildingFloor garrisoning: capacity check & elevated 3D sightline over 3m hedgerow
+  const garMap = new GameMap(1000, 1000, 1, { empty: true });
+  garMap.paint({ x: 300, y: 500 }, 40, "hedgerow"); // 3.0m canopy
+  garMap.addBuilding({
+    id: "gar_bld",
+    footprint: [{ x: 190, y: 490 }, { x: 210, y: 490 }, { x: 210, y: 510 }, { x: 190, y: 510 }],
+    center: { x: 200, y: 500 },
+    groundElevation: 0,
+    roofHeight: 8.5,
+    floors: [
+      { level: 1, elevationOffset: 1.5, capacity: 4, integrity: 100, state: "intact", occupants: [], modifiers: { damageMult: 0.5, signatureMult: 0.5 } },
+      { level: 2, elevationOffset: 4.7, capacity: 10, integrity: 100, state: "intact", occupants: [], modifiers: { damageMult: 0.45, signatureMult: 0.6 } },
+    ],
+  });
+  const garWorld = new World(garMap, 2);
+  const squad = garWorld.add({ id: "Inf 1", side: "blue", type: "infantry", pos: { x: 150, y: 500 } });
+  const targetTank = garWorld.add({ id: "Tgt", side: "red", type: "tank", pos: { x: 600, y: 500 }, roe: "hold_fire" });
+
+  assert.notEqual(garWorld.garrisonFloor(squad, "gar_bld", 1), "ok", "8-man squad must be rejected from capacity-4 F1");
+  assert.equal(garWorld.garrisonFloor(squad, "gar_bld", 2), "ok", "8-man squad must fit capacity-10 F2");
+  assert.deepEqual(garMap.buildings[0].floors[1].occupants, ["Inf 1"]);
+  assert.equal(garWorld.unitEyeHeight(squad), 4.7);
+  garWorld.step();
+  assert.equal(squad.ownPerception.get(targetTank.id), "visual", "Elevated F2 observer must see over 3m hedgerow");
+  assert.equal(garWorld.vacateBuilding(squad), "ok");
+  assert.deepEqual(garMap.buildings[0].floors[1].occupants, []);
+
+  // 2b. Move-then-garrison from >25m & non-garrisoning building obstacle avoidance
+  const passTank = garWorld.add({ id: "PassTank", side: "blue", type: "tank", pos: { x: 140, y: 500 } });
+  garWorld.command(passTank, { kind: "move", dest: { x: 260, y: 500 } });
+  for (let i = 0; i < 20; i++) {
+    garWorld.step();
+    assert.equal(garMap.buildingAt(passTank.pos), undefined, "Tank must steer around buildings instead of passing through");
+  }
+  squad.pos = { x: 150, y: 500 };
+  assert.equal(garWorld.orderGarrison(squad, "gar_bld", 2), "ok");
+  assert.equal(squad.garrison, undefined, "Distant garrison order must walk to building rather than teleporting");
+  for (let i = 0; i < 60 && !squad.garrison; i++) garWorld.step();
+  assert.deepEqual(squad.garrison, { buildingId: "gar_bld", floorLevel: 2 }, "Squad must garrison upon reaching building");
+  assert.equal(garWorld.vacateBuilding(squad), "ok");
+
+  // 3. Two-tier detection: muzzleSignature -> Contact (no UnitType), bodySignature -> Visual (with UnitType)
+  const spotMap = new GameMap(3000, 1000, 1, { empty: true });
+  spotMap.paint({ x: 1600, y: 500 }, 60, "light_forest");
+  const spotWorld = new World(spotMap, 3);
+  const obsTank = spotWorld.add({ id: "ObsTank", side: "blue", type: "tank", pos: { x: 650, y: 500 }, roe: "hold_fire" });
+  const hiddenAtgm = spotWorld.add({ id: "HiddenATGM", side: "red", type: "atgm", pos: { x: 1600, y: 500 }, roe: "hold_fire" });
+
+  // Settle infantry for 15 ticks out of sightline/visual range
+  for (let i = 0; i < 16; i++) spotWorld.step();
+  const baseBodySig = spotWorld.computeBodySignature(hiddenAtgm);
+  assert.equal(spotWorld.contacts.blue.get(hiddenAtgm.id), undefined, "Concealed stationary ATGM at 1200m must stay undetected");
+  assert.equal(obsTank.ownPerception.get(hiddenAtgm.id), "none");
+
+  // Fire from concealment outside Visual range -> Contact with heavy_weapon, type undefined
+  hiddenAtgm.roe = "fire_at_will";
+  spotWorld.step();
+  assert.equal(spotWorld.computeBodySignature(hiddenAtgm), baseBodySig, "Firing must not raise bodySignature");
+  const contact = spotWorld.contacts.blue.get(hiddenAtgm.id);
+  assert.ok(contact, "Firing muzzle flash must generate a Contact");
+  assert.equal(contact.level, "contact");
+  assert.equal(contact.weaponClass, "heavy_weapon");
+  assert.equal(contact.type, undefined, "Contact must not reveal UnitType before Visual range");
+
+  // Close within Visual threshold -> upgrades to Visual with UnitType === "atgm"
+  obsTank.pos = { x: 1520, y: 500 };
+  spotWorld.step();
+  const visual = spotWorld.contacts.blue.get(hiddenAtgm.id);
+  assert.ok(visual);
+  assert.equal(visual.level, "visual");
+  assert.equal(visual.type, "atgm");
+  assert.equal(obsTank.ownPerception.get(hiddenAtgm.id), "visual");
+}
+
+verifyPhase2A();
+console.log("Phase 2A spotting, mobility & garrison checks passed.");
 
 const objective = map.resolve("Geisa")!;
 for (const u of world.alive("blue")) world.command(u, { kind: "attack", dest: objective, destName: "Geisa" });
