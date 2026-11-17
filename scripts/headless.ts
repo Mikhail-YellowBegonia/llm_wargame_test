@@ -794,6 +794,121 @@ function verifyPhase3B() {
 verifyPhase3B();
 console.log("Phase 3B logistics (FOB/SupplyVehicle), finite ammo, WIA/KIA & reconstitution checks passed.");
 
+function verifyPhase3C() {
+  const m = new GameMap(4000, 4000, 1, { empty: true });
+  const w = new World(m, 55);
+
+  // 1. Fixed-wing 2x linear airspace, low/high altitude SAM vs SHORAD trade-offs & dogfight Energy Advantage
+  const sam = w.add({ id: "RedSAM", side: "red", type: "sam", pos: { x: 200, y: 2000 }, roe: "hold_fire" });
+  const shorad = w.add({ id: "RedSHORAD", side: "red", type: "shorad", pos: { x: 2000, y: 2000 }, roe: "hold_fire" });
+  const reqBefore = w.sideResources.blue;
+  const sortie = w.callAirSortie("blue", { x: 2000, y: 2000 }, "cap_loiter", { altitude: "high", id: "BlueCAP" });
+  assert.ok(sortie.ok && sortie.unit);
+  const jet = sortie.unit!;
+  assert.ok(w.sideResources.blue < reqBefore, "Requisitioning fixed-wing sortie must deduct requisition");
+  assert.ok(jet.pos.x < 0 && w.inAirBounds(jet.pos), "Aircraft must spawn inside outer 2x linear airspace");
+
+  // Outer-airspace SAM engagement: high altitude exposed to AreaAirDefense, low altitude degraded vs SAM; opposite vs SHORAD
+  w.step();
+  const samHighHit = w.computeSlotHitChance(sam, sam.weapons[0], jet, 2200);
+  jet.flightAltitude = "low";
+  const samLowHit = w.computeSlotHitChance(sam, sam.weapons[0], jet, 2200);
+  assert.ok(samHighHit > samLowHit * 2, "AreaAirDefense (sam) must strongly favor high altitude over low ingress");
+
+  const shoradLowHit = w.computeSlotHitChance(shorad, shorad.weapons[0], jet, 1200);
+  jet.flightAltitude = "high";
+  const shoradHighHit = w.computeSlotHitChance(shorad, shorad.weapons[0], jet, 1200);
+  assert.ok(shoradLowHit > shoradHighHit * 3, "SHORAD must strongly threaten low aircraft and be degraded vs high");
+
+  // Dogfight Energy Advantage & Afterburner fuel burn
+  const redLowJet = w.add({
+    id: "RedLowJet",
+    side: "red",
+    type: "aircraft",
+    pos: { x: jet.pos.x + 800, y: jet.pos.y },
+    flightAltitude: "low",
+    airState: "on_station",
+    sortieTarget: { x: 2000, y: 2000 },
+    roe: "hold_fire",
+  });
+  const fuelBeforeAb = jet.fuel;
+  w.step();
+  assert.equal(jet.afterburner, true, "Dogfight must engage Afterburner");
+  assert.ok(fuelBeforeAb - jet.fuel > 2.5, "Afterburner must sharply multiply fuel consumption");
+  redLowJet.strength = 100;
+  jet.strength = 100;
+  jet.suppression = 0;
+  const highVsLow = w.computeSlotHitChance(jet, jet.weapons[0], redLowJet, 1000);
+  const lowVsHigh = w.computeSlotHitChance(redLowJet, redLowJet.weapons[0], jet, 1000);
+  assert.ok(highVsLow > lowVsHigh, "High-altitude aircraft must gain dogfight Energy Advantage over low-altitude target");
+  w.removeUnit("RedLowJet");
+  w.removeUnit("RedSAM");
+  w.removeUnit("RedSHORAD");
+
+  // Stress abort -> egress -> free 3-timer turnaround -> zero-cost relaunch
+  jet.suppression = 75;
+  jet.strength = 80;
+  jet.weapons[0].ammoRemaining = 1;
+  w.step();
+  assert.equal(jet.airState, "egress", "High pilot stress must trigger immediate abort & egress");
+  let enteredTurnaround = false;
+  let readyAgain = false;
+  for (let i = 0; i < 60; i++) {
+    w.step();
+    const curJet = w.get("BlueCAP")!;
+    if (curJet.airState === "turnaround" && !enteredTurnaround) {
+      enteredTurnaround = true;
+      assert.ok(curJet.turnaroundTimers!.refuelTime > 0 && curJet.turnaroundTimers!.repairTime > 0 && curJet.turnaroundTimers!.rearmTime > 0);
+    }
+    if (curJet.airState === "at_base") { readyAgain = true; break; }
+  }
+  assert.ok(enteredTurnaround && readyAgain, "Egressing aircraft must cycle all 3 turnaround timers back to at_base");
+  const reqBeforeReuse = w.sideResources.blue;
+  const reuse = w.callAirSortie("blue", { x: 2000, y: 2000 }, "strike_egress");
+  assert.ok(reuse.ok && reuse.unit?.id === "BlueCAP");
+  assert.equal(w.sideResources.blue, reqBeforeReuse, "Post-turnaround sortie launch must be free");
+  w.removeUnit("BlueCAP");
+
+  // 2. Helicopter <30% HP ForcedLanding, troop evacuation, 50% SupplyVehicle cap (no rearm) & FOB 100% repair+rearm
+  const fob = w.add({ id: "HeloFOB", side: "blue", type: "fob", pos: { x: 500, y: 500 } });
+  const sv = w.add({ id: "HeloTruck", side: "blue", type: "supply_truck", pos: { x: 1500, y: 1500 }, supplyCarried: 100 });
+  const helo = w.add({ id: "Helo1", side: "blue", type: "helicopter", pos: { x: 1550, y: 1500 }, roe: "hold_fire" });
+  const pax = w.add({ id: "HeloPax", side: "blue", type: "infantry", pos: { x: 1550, y: 1500 }, roe: "hold_fire" });
+  assert.equal(w.landHelicopter(helo), "ok");
+  assert.equal(w.embark(pax, helo), "ok");
+  assert.equal(w.takeoffHelicopter(helo), "ok");
+  helo.weapons[0].ammoRemaining = 0;
+  helo.strength = 45;
+  // Drop HP below 30% without burst overkill (>=8 HP left) -> ForcedLanding
+  const redAa = w.add({ id: "RedAA", side: "red", type: "shorad", pos: { x: 2200, y: 2200 }, roe: "hold_fire" });
+  (w as unknown as { hit: (u: typeof helo, d: number, s: number, by?: typeof redAa) => void }).hit(helo, 25, 25, redAa);
+  assert.equal(helo.isForcedLanding, true, "Helicopter <30% HP must enter ForcedLanding");
+  assert.equal(helo.isLanded, true);
+  assert.equal(pax.embarkedIn, undefined, "ForcedLanding must immediately evacuate embarked infantry");
+  assert.ok(helo.strength >= 8 && helo.strength < 30);
+
+  // SupplyVehicle repairs forced-landed helicopter up to 50% cap (cannot rearm weapons)
+  for (let i = 0; i < 15; i++) w.step();
+  assert.equal(helo.strength, 50, "SupplyVehicle repair on helicopter must cap at 50% HP");
+  assert.equal(helo.weapons[0].ammoRemaining, 0, "SupplyVehicle must NOT rearm helicopter weapons");
+  assert.equal(w.takeoffHelicopter(helo), "ok", "Repaired >=30% helicopter must be able to take off");
+
+  // Fly back to FOB, land, and receive 100% repair + full rearm
+  helo.pos = { x: fob.pos.x + 40, y: fob.pos.y };
+  assert.equal(w.landHelicopter(helo), "ok");
+  for (let i = 0; i < 10; i++) w.step();
+  assert.equal(helo.strength, 100, "FOB must repair landed helicopter to 100% HP");
+  assert.equal(helo.weapons[0].ammoRemaining, helo.weapons[0].maxAmmo, "FOB must rearm helicopter weapons");
+
+  // Heavy burst overkill destroys helicopter outright
+  assert.equal(w.takeoffHelicopter(helo), "ok");
+  (w as unknown as { hit: (u: typeof helo, d: number, s: number, by?: typeof redAa) => void }).hit(helo, 95, 50, redAa);
+  assert.equal(helo.state, "destroyed", "Heavy burst damage must destroy helicopter outright");
+}
+
+verifyPhase3C();
+console.log("Phase 3C fixed-wing (2x airspace, altitude, Afterburner, turnaround), helo ForcedLanding & SAM/SHORAD checks passed.");
+
 const objective = map.resolve("Geisa")!;
 for (const u of world.alive("blue")) world.command(u, { kind: "attack", dest: objective, destName: "Geisa" });
 

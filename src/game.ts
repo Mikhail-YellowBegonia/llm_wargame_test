@@ -4,7 +4,7 @@ import { Commander, OrderPayload } from "./agents/commander";
 import { RadioMsg, RadioNet } from "./comms/radio";
 import { PlayerPicture } from "./perception/player";
 import { COMPANY, PLAYER, buildScenario } from "./sim/scenario";
-import { Order, Roe, Side, SimEvent, UnitType } from "./sim/world";
+import { AirMissionProfile, FlightAltitude, Order, Roe, Side, SimEvent, UnitType } from "./sim/world";
 import type { Vec } from "./sim/map";
 
 export interface GameHooks {
@@ -86,6 +86,13 @@ export function createGame(model: LanguageModel, hooks: GameHooks, seed = 7) {
     },
     /** Debug sandbox helper: spawn a new unit on the map. */
     spawnUnit(side: Side, type: UnitType, pos: Vec, id?: string) {
+      if (type === "aircraft") {
+        const res = world.callAirSortie(side, pos, "cap_loiter", { id, commander: side === "blue" ? COMPANY : undefined });
+        if (res.ok && res.unit) {
+          picture.sync();
+          return res.unit;
+        }
+      }
       let uid = id;
       if (!uid) {
         do { uid = `${side === "blue" ? "Blue" : "Red"} ${type} ${++spawnSeq}`; } while (world.get(uid));
@@ -103,6 +110,44 @@ export function createGame(model: LanguageModel, hooks: GameHooks, seed = 7) {
       });
       picture.sync();
       return unit;
+    },
+    /** Call in a fixed-wing air sortie (uses free turnaround aircraft if ready at base). */
+    callAirSortie(side: Side, dest: Vec, missionProfile: AirMissionProfile = "cap_loiter", altitude?: FlightAltitude) {
+      const res = world.callAirSortie(side, dest, missionProfile, {
+        altitude,
+        commander: side === "blue" ? COMPANY : undefined,
+      });
+      if (res.ok) picture.sync();
+      return res;
+    },
+    landHelicopter(unitId: string) {
+      const u = world.get(unitId);
+      if (!u) return `unknown unit "${unitId}"`;
+      const res = world.landHelicopter(u);
+      if (res === "ok") picture.sync();
+      return res;
+    },
+    takeoffHelicopter(unitId: string) {
+      const u = world.get(unitId);
+      if (!u) return `unknown unit "${unitId}"`;
+      const res = world.takeoffHelicopter(u);
+      if (res === "ok") picture.sync();
+      return res;
+    },
+    embarkUnit(passengerId: string, transportId: string) {
+      const p = world.get(passengerId);
+      const t = world.get(transportId);
+      if (!p || !t) return "unknown unit";
+      const res = world.embark(p, t);
+      if (res === "ok") picture.sync();
+      return res;
+    },
+    disembarkUnit(passengerId: string) {
+      const p = world.get(passengerId);
+      if (!p) return "unknown unit";
+      const res = world.disembark(p);
+      if (res === "ok") picture.sync();
+      return res;
     },
     /** Debug sandbox helper: remove a unit cleanly from the world. */
     deleteUnit(id: string) {

@@ -5,10 +5,21 @@ import { ArmorValue, CombatModifiers, DEFAULT_BUILDING_ARMOR, DynamicOcclusionVo
 
 export type { ArmorValue };
 export type Side = "blue" | "red";
-export type UnitType = "tank" | "ifv" | "infantry" | "atgm" | "artillery" | "mlrs" | "recon" | "fob" | "supply_truck";
+export type UnitType =
+  | "tank" | "ifv" | "infantry" | "atgm" | "artillery" | "mlrs" | "recon"
+  | "fob" | "supply_truck" | "shorad" | "sam" | "helicopter" | "aircraft";
 export type ArtilleryAmmoType = "HE_Impact" | "HE_Airburst" | "Smoke" | "Direct_Self_Defense";
+export type FlightAltitude = "low" | "high";
+export type AirMissionProfile = "cap_loiter" | "strike_egress";
+export type AirState = "ingress" | "on_station" | "egress" | "turnaround" | "at_base";
+export type WeaponTargetDomain = "ground" | "air" | "both";
+export interface TurnaroundTimers {
+  refuelTime: number;
+  repairTime: number;
+  rearmTime: number;
+}
 export type Roe = "fire_at_will" | "return_fire" | "hold_fire";
-export type OrderKind = "hold" | "move" | "attack" | "withdraw" | "fire_mission" | "withdraw_off_map";
+export type OrderKind = "hold" | "move" | "attack" | "withdraw" | "fire_mission" | "withdraw_off_map" | "air_sortie";
 export interface UnitGarrison {
   buildingId: string;
   floorLevel: number;
@@ -19,6 +30,7 @@ export interface Order {
   destName?: string;
   garrison?: UnitGarrison;
   ammoType?: ArtilleryAmmoType;
+  missionProfile?: AirMissionProfile;
 }
 export interface FireMissionState {
   targetPos: Vec;
@@ -87,6 +99,7 @@ export interface WeaponSlot {
   accuracy: number;        // baseline hit chance at Visual (100%)
   weaponClass: WeaponSignatureClass;
   muzzleSignature: number;
+  targetDomain?: WeaponTargetDomain;
   mutexGroup?: string;
   mutexLockSec?: number;
 }
@@ -158,6 +171,11 @@ interface TypeStats {
   supplyCapacity?: number;
   passengerCapacity?: number;
   hasFiringPorts?: boolean;
+  isAirUnit?: boolean;
+  isFixedWing?: boolean;
+  maxFuel?: number;
+  fuelBurnPerTick?: number;
+  afterburnerMult?: number;
   indirect?: IndirectProfile;
   armor: ArmorProfile;
   weapons: ReadonlyArray<Omit<WeaponSlot, "cooldown" | "ammoRemaining">>;
@@ -571,6 +589,230 @@ export const STATS: Record<UnitType, TypeStats> = {
     armor: SOFT_ARMOR,
     weapons: [],
   },
+  shorad: {
+    label: "SHORAD platoon",
+    armored: true,
+    hasObserver: false,
+    mobility: "tracked",
+    traits: ["vehicle", "armored", "tall_profile"],
+    headcount: 0,
+    eyeHeight: 2.8,
+    baseSignature: 1.0,
+    weaponClass: "heavy_weapon",
+    muzzleSignature: 1.6,
+    range: 2400,
+    spot: 3200,
+    baseSpeedKmH: 30,
+    reinforceCost: 110,
+    armor: {
+      front: { ke: 4, ce: 5 },
+      side: { ke: 2, ce: 3 },
+      rear: { ke: 1, ce: 2 },
+      top: { ke: 1, ce: 1 },
+    },
+    weapons: [
+      {
+        id: "shorad_sam",
+        name: "SHORAD SAM",
+        ammo: "HEAT",
+        targetDomain: "air",
+        pen: 6,
+        damage: 38,
+        suppression: 32,
+        range: 2400,
+        reloadSec: 4,
+        maxAmmo: 10,
+        accuracy: 0.74,
+        weaponClass: "heavy_weapon",
+        muzzleSignature: 1.7,
+      },
+      {
+        id: "shorad_autocannon",
+        name: "35mm Twin AA",
+        ammo: "AP",
+        targetDomain: "both",
+        pen: 5,
+        damage: 11,
+        suppression: 14,
+        range: 1600,
+        reloadSec: 1,
+        maxAmmo: 80,
+        accuracy: 0.68,
+        weaponClass: "light_weapon",
+        muzzleSignature: 1.35,
+      },
+    ],
+  },
+  sam: {
+    label: "area SAM battery",
+    armored: true,
+    hasObserver: false,
+    mobility: "tracked",
+    traits: ["vehicle", "armored", "tall_profile"],
+    headcount: 0,
+    eyeHeight: 3.4,
+    baseSignature: 1.2,
+    weaponClass: "heavy_weapon",
+    muzzleSignature: 2.1,
+    range: 5500,
+    spot: 5500,
+    baseSpeedKmH: 20,
+    reinforceCost: 160,
+    armor: {
+      front: { ke: 3, ce: 4 },
+      side: { ke: 2, ce: 2 },
+      rear: { ke: 1, ce: 1 },
+      top: { ke: 1, ce: 1 },
+    },
+    weapons: [
+      {
+        id: "area_sam",
+        name: "Long-Range SAM",
+        ammo: "HEAT",
+        targetDomain: "air",
+        pen: 10,
+        damage: 58,
+        suppression: 46,
+        range: 5500,
+        reloadSec: 6,
+        maxAmmo: 8,
+        accuracy: 0.8,
+        weaponClass: "heavy_weapon",
+        muzzleSignature: 2.1,
+      },
+    ],
+  },
+  helicopter: {
+    label: "attack/transport helicopter",
+    armored: false,
+    hasObserver: false,
+    isAirUnit: true,
+    mobility: "amphibious",
+    traits: ["vehicle", "tall_profile"],
+    headcount: 0,
+    eyeHeight: 35,
+    baseSignature: 1.15,
+    weaponClass: "heavy_weapon",
+    muzzleSignature: 1.6,
+    range: 2200,
+    spot: 2800,
+    baseSpeedKmH: 180,
+    passengerCapacity: 1,
+    reinforceCost: 140,
+    armor: {
+      front: { ke: 2, ce: 2 },
+      side: { ke: 1, ce: 1 },
+      rear: { ke: 1, ce: 1 },
+      top: { ke: 1, ce: 1 },
+    },
+    weapons: [
+      {
+        id: "helo_atgm",
+        name: "Heliborne ATGM",
+        ammo: "HEAT",
+        targetDomain: "both",
+        pen: 18,
+        damage: 32,
+        suppression: 16,
+        range: 2200,
+        reloadSec: 6,
+        maxAmmo: 8,
+        accuracy: 0.76,
+        weaponClass: "heavy_weapon",
+        muzzleSignature: 1.6,
+      },
+      {
+        id: "helo_cannon",
+        name: "30mm Chain Gun",
+        ammo: "AP",
+        targetDomain: "both",
+        pen: 4,
+        damage: 8,
+        suppression: 10,
+        range: 1400,
+        reloadSec: 1,
+        maxAmmo: 50,
+        accuracy: 0.68,
+        weaponClass: "light_weapon",
+        muzzleSignature: 1.25,
+      },
+    ],
+  },
+  aircraft: {
+    label: "fixed-wing aircraft",
+    armored: false,
+    hasObserver: false,
+    isAirUnit: true,
+    isFixedWing: true,
+    mobility: "amphibious",
+    traits: ["vehicle", "low_profile"],
+    headcount: 0,
+    eyeHeight: 200,
+    baseSignature: 1.25,
+    weaponClass: "heavy_weapon",
+    muzzleSignature: 1.8,
+    range: 2800,
+    spot: 4500,
+    baseSpeedKmH: 600,
+    maxFuel: 180,
+    fuelBurnPerTick: 1.0,
+    afterburnerMult: 3.5,
+    reinforceCost: 180,
+    armor: {
+      front: { ke: 2, ce: 2 },
+      side: { ke: 1, ce: 1 },
+      rear: { ke: 1, ce: 1 },
+      top: { ke: 1, ce: 1 },
+    },
+    weapons: [
+      {
+        id: "aam",
+        name: "Air-to-Air Missile",
+        ammo: "HEAT",
+        targetDomain: "air",
+        pen: 8,
+        damage: 45,
+        suppression: 35,
+        range: 2800,
+        reloadSec: 4,
+        maxAmmo: 4,
+        accuracy: 0.78,
+        weaponClass: "heavy_weapon",
+        muzzleSignature: 1.8,
+      },
+      {
+        id: "agm_strike",
+        name: "Air-to-Ground Ordnance",
+        ammo: "HE",
+        targetDomain: "ground",
+        pen: 12,
+        d0: 10,
+        damage: 42,
+        suppression: 34,
+        range: 2200,
+        reloadSec: 3,
+        maxAmmo: 4,
+        accuracy: 0.8,
+        weaponClass: "heavy_weapon",
+        muzzleSignature: 1.8,
+      },
+      {
+        id: "air_cannon",
+        name: "20mm Vulcan",
+        ammo: "AP",
+        targetDomain: "both",
+        pen: 4,
+        damage: 14,
+        suppression: 14,
+        range: 1200,
+        reloadSec: 1,
+        maxAmmo: 40,
+        accuracy: 0.7,
+        weaponClass: "light_weapon",
+        muzzleSignature: 1.3,
+      },
+    ],
+  },
 };
 
 function emptyRoles(): Record<SpecialistRole, number> {
@@ -776,6 +1018,16 @@ export interface Unit {
   veterancy: number;
   offMapReconstituteAt?: number;
   reconstituteEntryPos?: Vec;
+  flightAltitude?: FlightAltitude;
+  missionProfile?: AirMissionProfile;
+  airState?: AirState;
+  fuel: number;
+  maxFuel: number;
+  afterburner: boolean;
+  turnaroundTimers?: TurnaroundTimers;
+  isLanded: boolean;
+  isForcedLanding: boolean;
+  sortieTarget?: Vec;
 }
 
 export interface SupplyTransferEvent {
@@ -867,6 +1119,15 @@ export interface UnitTelemetry {
   supplyCapacity: number;
   veterancy: number;
   offMapReconstituteAt?: number;
+  flightAltitude?: FlightAltitude;
+  missionProfile?: AirMissionProfile;
+  airState?: AirState;
+  fuel: number;
+  maxFuel: number;
+  afterburner: boolean;
+  turnaroundTimers?: TurnaroundTimers;
+  isLanded: boolean;
+  isForcedLanding: boolean;
 }
 
 export interface SupplyTransferEvent {
@@ -879,7 +1140,7 @@ export interface SupplyTransferEvent {
 
 export type EventKind =
   | "contact" | "under_fire" | "pinned" | "recovered" | "casualties"
-  | "arrived" | "broken" | "destroyed" | "enemy_destroyed" | "fire_mission";
+  | "arrived" | "broken" | "destroyed" | "enemy_destroyed" | "fire_mission" | "forced_landing" | "air_sortie";
 export interface SimEvent { t: number; kind: EventKind; unit: string; text: string }
 
 const SETTLE_THRESHOLD_TICKS = 15;
@@ -1063,12 +1324,14 @@ export class World {
       | "settledTicks" | "stuckTicks" | "embarkedIds" | "activeMoraleEvents"
       | "ownPerception" | "armor" | "weapons" | "mutexCooldowns" | "hasObserver" | "isPositionCalibrated"
       | "indirectAmmo" | "maxIndirectAmmo" | "supplyCarried" | "supplyCapacity" | "veterancy"
+      | "fuel" | "maxFuel" | "afterburner" | "isLanded" | "isForcedLanding"
     > & Partial<Unit>,
   ) {
     const st = STATS[u.type];
     const heading = u.heading ?? (u.side === "blue" ? 0 : Math.PI);
     const maxInd = st.indirect?.maxIndirectAmmo ?? 0;
     const cap = st.supplyCapacity ?? 0;
+    const maxFuel = st.maxFuel ?? Infinity;
     const unit: Unit = {
       prevPos: { ...u.pos },
       heading,
@@ -1104,6 +1367,14 @@ export class World {
       supplyCarried: cap === Infinity ? Infinity : 0, // SupplyVehicle enters empty (0 supply)
       supplyCapacity: cap,
       veterancy: 0,
+      flightAltitude: st.isFixedWing ? (u.flightAltitude ?? "high") : undefined,
+      missionProfile: st.isFixedWing ? (u.missionProfile ?? "cap_loiter") : undefined,
+      airState: st.isFixedWing ? (u.airState ?? "on_station") : undefined,
+      fuel: maxFuel,
+      maxFuel,
+      afterburner: false,
+      isLanded: false,
+      isForcedLanding: false,
       ...u,
     };
     this.units.push(unit);
@@ -1141,7 +1412,142 @@ export class World {
   get(id: string) { return this.units.find((u) => u.id.toLowerCase() === id.trim().toLowerCase()); }
   alive(side?: Side) { return this.units.filter((u) => u.state !== "destroyed" && (!side || u.side === side)); }
   onMapAlive(side?: Side) {
-    return this.units.filter((u) => u.state !== "destroyed" && u.offMapReconstituteAt === undefined && (!side || u.side === side));
+    return this.units.filter(
+      (u) =>
+        u.state !== "destroyed" &&
+        u.offMapReconstituteAt === undefined &&
+        u.airState !== "turnaround" &&
+        u.airState !== "at_base" &&
+        (!side || u.side === side),
+    );
+  }
+
+  /** 2x linear (4x area) outer airspace bounds: [-0.5w, 1.5w] x [-0.5d, 1.5d]. */
+  inAirBounds(p: Vec): boolean {
+    return (
+      p.x >= -this.map.width * 0.5 &&
+      p.x <= this.map.width * 1.5 &&
+      p.y >= -this.map.depth * 0.5 &&
+      p.y <= this.map.depth * 1.5
+    );
+  }
+
+  private airIngressOrigin(side: Side, targetPos: Vec): Vec {
+    return {
+      x: side === "blue" ? -this.map.width * 0.45 : this.map.width * 1.45,
+      y: Math.min(this.map.depth * 1.25, Math.max(-this.map.depth * 0.25, targetPos.y)),
+    };
+  }
+
+  private nearestAirExit(p: Vec): Vec {
+    const minX = -this.map.width * 0.5;
+    const maxX = this.map.width * 1.5;
+    const minY = -this.map.depth * 0.5;
+    const maxY = this.map.depth * 1.5;
+    const candidates: Vec[] = [
+      { x: minX, y: p.y },
+      { x: maxX, y: p.y },
+      { x: p.x, y: minY },
+      { x: p.x, y: maxY },
+    ];
+    return candidates.sort((a, b) => dist(p, a) - dist(p, b))[0];
+  }
+
+  chooseFlightAltitude(side: Side, missionProfile: AirMissionProfile): FlightAltitude {
+    const knownEnemies = [...this.contacts[side].values()];
+    const hasAreaSam = knownEnemies.some((c) => c.type === "sam");
+    const hasShorad = knownEnemies.some((c) => c.type === "shorad");
+    const hasEnemyAir = knownEnemies.some((c) => c.type === "aircraft");
+    if (missionProfile === "cap_loiter") {
+      if (hasAreaSam && !hasEnemyAir && !hasShorad) return "low";
+      return "high";
+    }
+    if (hasAreaSam) return "low";
+    if (hasShorad) return "high";
+    return "low";
+  }
+
+  /** Requisition or launch an available at-base fixed-wing sortie (zero cost on turnaround reuse). */
+  callAirSortie(
+    side: Side,
+    targetPos: Vec,
+    missionProfile: AirMissionProfile = "cap_loiter",
+    opts?: { altitude?: FlightAltitude; id?: string; commander?: string },
+  ): { ok: boolean; unit?: Unit; reason?: string } {
+    const readyAtBase = this.units.find(
+      (u) => u.side === side && u.type === "aircraft" && u.state !== "destroyed" && u.airState === "at_base",
+    );
+    const origin = this.airIngressOrigin(side, targetPos);
+    const alt = opts?.altitude ?? this.chooseFlightAltitude(side, missionProfile);
+
+    if (readyAtBase) {
+      readyAtBase.pos = { ...origin };
+      readyAtBase.prevPos = { ...origin };
+      readyAtBase.heading = Math.atan2(targetPos.y - origin.y, targetPos.x - origin.x);
+      readyAtBase.prevHeading = readyAtBase.heading;
+      readyAtBase.flightAltitude = alt;
+      readyAtBase.missionProfile = missionProfile;
+      readyAtBase.airState = "ingress";
+      readyAtBase.sortieTarget = { ...targetPos };
+      readyAtBase.fuel = readyAtBase.maxFuel;
+      readyAtBase.afterburner = false;
+      readyAtBase.turnaroundTimers = undefined;
+      readyAtBase.order = { kind: "air_sortie", dest: { ...targetPos }, missionProfile };
+      readyAtBase.state = "moving";
+      this.emit("air_sortie", readyAtBase, `${readyAtBase.id} launched free turnaround ${missionProfile} (${alt} alt)`);
+      return { ok: true, unit: readyAtBase };
+    }
+
+    const cost = STATS.aircraft.reinforceCost;
+    if (this.sideResources[side] < cost) {
+      return { ok: false, reason: `insufficient requisition (${this.sideResources[side]}/${cost})` };
+    }
+    this.sideResources[side] -= cost;
+    const seq = this.units.filter((u) => u.type === "aircraft").length + 1;
+    const uid = opts?.id ?? `${side === "blue" ? "Blue" : "Red"} Air ${seq}`;
+    const plane = this.add({
+      id: uid,
+      side,
+      type: "aircraft",
+      pos: origin,
+      commander: opts?.commander,
+      flightAltitude: alt,
+      missionProfile,
+      airState: "ingress",
+      sortieTarget: { ...targetPos },
+      order: { kind: "air_sortie", dest: { ...targetPos }, missionProfile },
+      state: "moving",
+    });
+    plane.heading = Math.atan2(targetPos.y - origin.y, targetPos.x - origin.x);
+    plane.prevHeading = plane.heading;
+    this.emit("air_sortie", plane, `${plane.id} requisitioned (-${cost} req) for ${missionProfile} (${alt} alt)`);
+    return { ok: true, unit: plane };
+  }
+
+  landHelicopter(u: Unit): string {
+    if (u.state === "destroyed") return "unit destroyed";
+    if (u.type !== "helicopter") return `${u.id} is not a helicopter`;
+    if (u.isLanded) return "already landed";
+    const nearFob = this.onMapAlive(u.side).some(
+      (f) => f.type === "fob" && dist(u.pos, f.pos) <= (STATS.fob.supplyRadius ?? 220),
+    );
+    if (!nearFob && this.map.terrainIdAt(u.pos) !== "open") {
+      return `cannot land on ${this.map.terrainIdAt(u.pos)} (requires open terrain or FOB)`;
+    }
+    u.isLanded = true;
+    u.order = { kind: "hold" };
+    u.state = "holding";
+    return "ok";
+  }
+
+  takeoffHelicopter(u: Unit): string {
+    if (u.state === "destroyed") return "unit destroyed";
+    if (u.type !== "helicopter") return `${u.id} is not a helicopter`;
+    if (!u.isLanded) return "already airborne";
+    if (u.strength < 30) return `insufficient structural integrity (${Math.round(u.strength)}% < 30% flight threshold)`;
+    u.isForcedLanding = false;
+    u.isLanded = false;
+    return "ok";
   }
 
   private nearestMapEdge(p: Vec): Vec {
@@ -1223,7 +1629,20 @@ export class World {
   command(u: Unit, order: Order, roe?: Roe) {
     if (u.state === "destroyed") return "unit destroyed";
     if (u.offMapReconstituteAt !== undefined) return `${u.id} is off-map reconstituting`;
+    if (u.airState === "turnaround" || u.airState === "at_base") return `${u.id} is at airbase (${u.airState})`;
+    if (u.type === "helicopter" && u.isForcedLanding) return `${u.id} is forced-landed (<30% HP) and awaiting field repair`;
     if (u.state === "broken") return `${u.id} is broken and falling back, not responding to orders`;
+    if (u.type === "helicopter" && u.isLanded && order.dest) {
+      if (u.strength < 30) return `${u.id} cannot take off below 30% HP`;
+      u.isLanded = false;
+    }
+    if (order.kind === "air_sortie") {
+      if (u.type !== "aircraft") return `${u.id} is not fixed-wing aircraft`;
+      if (!order.dest) return "air_sortie requires dest";
+      u.missionProfile = order.missionProfile ?? u.missionProfile ?? "cap_loiter";
+      u.sortieTarget = { ...order.dest };
+      u.airState = "on_station";
+    }
     if (order.kind === "fire_mission") {
       if (!order.dest) return "fire_mission requires target dest";
       const fmRes = this.startFireMission(u, order.dest, order.ammoType);
@@ -1317,6 +1736,8 @@ export class World {
   }
 
   unitEyeHeight(u: Unit): number {
+    if (u.type === "aircraft") return u.flightAltitude === "low" ? 120 : 450;
+    if (u.type === "helicopter") return u.isLanded ? 1.8 : STATS.helicopter.eyeHeight;
     return this.unitFloor(u)?.elevationOffset ?? u.eyeHeight;
   }
 
@@ -1351,11 +1772,12 @@ export class World {
     return u.baseSignature * terBase * sigMult * moveMult * cowerMult;
   }
 
-  /** Embark an infantry unit onto a friendly APC/IFV transport. */
+  /** Embark an infantry unit onto a friendly APC/IFV or landed helicopter transport. */
   embark(passenger: Unit, transport: Unit): string {
     if (passenger.state === "destroyed" || transport.state === "destroyed") return "unit destroyed";
     if (!passenger.traits.includes("infantry")) return `${passenger.id} is not infantry`;
     if (passenger.side !== transport.side) return "cannot embark on enemy vehicle";
+    if (transport.type === "helicopter" && !transport.isLanded) return `${transport.id} must be landed to embark infantry`;
     const cap = STATS[transport.type].passengerCapacity ?? 0;
     if (cap <= 0) return `${transport.id} has no passenger capacity`;
     if (transport.embarkedIds.length >= cap) return `${transport.id} is full`;
@@ -1579,6 +2001,15 @@ export class World {
       supplyCapacity: u.supplyCapacity,
       veterancy: u.veterancy,
       offMapReconstituteAt: u.offMapReconstituteAt,
+      flightAltitude: u.flightAltitude,
+      missionProfile: u.missionProfile,
+      airState: u.airState,
+      fuel: u.fuel,
+      maxFuel: u.maxFuel,
+      afterburner: u.afterburner,
+      turnaroundTimers: u.turnaroundTimers ? { ...u.turnaroundTimers } : undefined,
+      isLanded: u.isLanded,
+      isForcedLanding: u.isForcedLanding,
     };
   }
 
@@ -1591,12 +2022,114 @@ export class World {
     this.smokeVolumes = this.smokeVolumes.filter((v) => v.expiresAt > this.t);
     this.tickIndirectProjectiles();
     this.tickLogisticsAndRecovery();
+    this.tickAviationAndTimers();
     const live = this.onMapAlive();
     this.spot(live);
     for (const u of live) this.tickCooldowns(u);
     for (const u of live) this.tickFireMission(u);
     for (const u of live) this.fire(u);
     for (const u of live) this.bot(u);
+  }
+
+  private tickAviationAndTimers() {
+    const outerMinX = -this.map.width * 0.48;
+    const outerMaxX = this.map.width * 1.48;
+    const outerMinY = -this.map.depth * 0.48;
+    const outerMaxY = this.map.depth * 1.48;
+
+    for (const u of this.units) {
+      if (u.state === "destroyed" || u.type !== "aircraft") continue;
+
+      if (u.airState === "turnaround" && u.turnaroundTimers) {
+        const tm = u.turnaroundTimers;
+        if (tm.refuelTime > 0) tm.refuelTime -= 1;
+        if (tm.repairTime > 0) tm.repairTime -= 1;
+        if (tm.rearmTime > 0) tm.rearmTime -= 1;
+        if (tm.refuelTime <= 0 && tm.repairTime <= 0 && tm.rearmTime <= 0) {
+          u.airState = "at_base";
+          u.turnaroundTimers = undefined;
+          u.fuel = u.maxFuel;
+          u.strength = 100;
+          u.morale = 80;
+          u.suppression = 0;
+          u.afterburner = false;
+          for (const w of u.weapons) { w.ammoRemaining = w.maxAmmo; w.cooldown = 0; }
+          this.casualtyMarks.delete(u.id);
+          this.emit("air_sortie", u, `${u.id} turnaround complete, ready at base`);
+        }
+        continue;
+      }
+
+      if (u.airState === "at_base") continue;
+
+      const st = STATS.aircraft;
+      const targetUnit = u.target ? this.get(u.target) : undefined;
+      const enemyAirNearby = this.onMapAlive(u.side === "blue" ? "red" : "blue").some(
+        (e) => e.type === "aircraft" && dist(u.pos, e.pos) <= 3000,
+      );
+      u.afterburner = (targetUnit?.type === "aircraft" || enemyAirNearby) && u.airState !== "egress";
+
+      const burn = (st.fuelBurnPerTick ?? 1) * (u.afterburner ? (st.afterburnerMult ?? 3.5) : 1);
+      u.fuel = Math.max(0, u.fuel - burn);
+
+      const strikeSlot = u.weapons.find((w) => w.id === "agm_strike");
+      const strikeExpended = u.missionProfile === "strike_egress" && !!strikeSlot && strikeSlot.ammoRemaining <= 0;
+      const stressAbort = u.suppression >= 65 || u.morale < 30;
+      const bingoFuel = u.fuel <= 35;
+
+      if (u.airState !== "egress" && (stressAbort || bingoFuel || strikeExpended)) {
+        u.airState = "egress";
+        u.afterburner = false;
+        const exit = this.nearestAirExit(u.pos);
+        u.order = { kind: "air_sortie", dest: exit, missionProfile: u.missionProfile };
+        if (stressAbort) {
+          this.emit("broken", u, `${u.id} aborted mission under heavy pilot stress and is egressing`);
+        } else if (bingoFuel) {
+          this.emit("air_sortie", u, `${u.id} bingo fuel, egressing to base`);
+        }
+      }
+
+      const dest = u.airState === "egress" ? (u.order.dest ?? this.nearestAirExit(u.pos)) : (u.sortieTarget ?? u.order.dest);
+      if (dest) {
+        const airStep = st.baseSpeedKmH / 3.6;
+        const d = dist(u.pos, dest);
+        if (u.airState === "egress") {
+          const ang = Math.atan2(dest.y - u.pos.y, dest.x - u.pos.x);
+          u.heading = ang;
+          u.pos = d <= airStep ? { ...dest } : { x: u.pos.x + Math.cos(ang) * airStep, y: u.pos.y + Math.sin(ang) * airStep };
+          const atOuterEdge = u.pos.x <= outerMinX || u.pos.x >= outerMaxX || u.pos.y <= outerMinY || u.pos.y >= outerMaxY || d <= airStep;
+          if (atOuterEdge) {
+            const totalMax = u.weapons.reduce((s, w) => s + w.maxAmmo, 0);
+            const totalRem = u.weapons.reduce((s, w) => s + w.ammoRemaining, 0);
+            const usedFrac = totalMax > 0 ? (totalMax - totalRem) / totalMax : 0;
+            u.airState = "turnaround";
+            u.afterburner = false;
+            u.target = undefined;
+            u.order = { kind: "hold" };
+            u.state = "holding";
+            u.turnaroundTimers = {
+              refuelTime: Math.max(4, Math.ceil((1 - u.fuel / Math.max(1, u.maxFuel)) * 18)),
+              repairTime: u.strength < 100 ? Math.max(3, Math.ceil((100 - u.strength) * 0.25)) : 0,
+              rearmTime: usedFrac > 0 ? Math.max(4, Math.ceil(usedFrac * 16)) : 0,
+            };
+            this.emit("air_sortie", u, `${u.id} returned to base for turnaround`);
+          }
+        } else if (u.airState === "ingress" && d > 450) {
+          const ang = Math.atan2(dest.y - u.pos.y, dest.x - u.pos.x);
+          u.heading = ang;
+          u.pos = { x: u.pos.x + Math.cos(ang) * airStep, y: u.pos.y + Math.sin(ang) * airStep };
+        } else {
+          u.airState = "on_station";
+          // Orbit around sortieTarget
+          const orbitR = 450;
+          const curAng = Math.atan2(u.pos.y - dest.y, u.pos.x - dest.x);
+          const nextAng = curAng + airStep / orbitR;
+          const nextPos = { x: dest.x + Math.cos(nextAng) * orbitR, y: dest.y + Math.sin(nextAng) * orbitR };
+          u.heading = Math.atan2(nextPos.y - u.pos.y, nextPos.x - u.pos.x);
+          u.pos = nextPos;
+        }
+      }
+    }
   }
 
   private rearmUnit(u: Unit, maxFrac: number, budget = Infinity): number {
@@ -1638,10 +2171,12 @@ export class World {
           }
           continue;
         }
+        if (u.type === "helicopter" && !u.isLanded) continue;
         fobCovered.add(u.id);
-        let transferred = this.rearmUnit(u, 0.35) > 0;
+        let transferred = this.rearmUnit(u, u.type === "helicopter" ? 0.5 : 0.35) > 0;
         if (!u.subRoster && u.strength < 100) {
-          u.strength = Math.min(100, u.strength + 8);
+          u.strength = Math.min(100, u.strength + (u.type === "helicopter" ? 10 : 8));
+          if (u.type === "helicopter" && u.strength >= 30) u.isForcedLanding = false;
           transferred = true;
         }
         if (u.subRoster) {
@@ -1663,16 +2198,22 @@ export class World {
       if (sv.supplyCarried <= 0) continue;
       for (const u of this.onMapAlive(sv.side)) {
         if (sv.supplyCarried <= 0) break;
-        if (u.type === "fob" || u.type === "supply_truck" || fobCovered.has(u.id) || dist(u.pos, sv.pos) > truckRadius) continue;
+        if (u.type === "fob" || u.type === "supply_truck" || u.type === "aircraft" || fobCovered.has(u.id) || dist(u.pos, sv.pos) > truckRadius) continue;
+        if (u.type === "helicopter" && !u.isLanded) continue;
         let transferred = false;
-        const ammoSpent = this.rearmUnit(u, 0.25, sv.supplyCarried);
-        if (ammoSpent > 0) {
-          sv.supplyCarried = Math.max(0, sv.supplyCarried - ammoSpent);
-          transferred = true;
+        // SupplyVehicle CANNOT rearm helicopter weapons and caps helicopter repair at 50% HP
+        if (u.type !== "helicopter") {
+          const ammoSpent = this.rearmUnit(u, 0.25, sv.supplyCarried);
+          if (ammoSpent > 0) {
+            sv.supplyCarried = Math.max(0, sv.supplyCarried - ammoSpent);
+            transferred = true;
+          }
         }
-        if (!u.subRoster && u.strength < 100 && sv.supplyCarried > 0) {
-          const heal = Math.min(100 - u.strength, 2.5);
+        const repairCap = u.type === "helicopter" ? 50 : 100;
+        if (!u.subRoster && u.strength < repairCap && sv.supplyCarried > 0) {
+          const heal = Math.min(repairCap - u.strength, u.type === "helicopter" ? 4 : 2.5);
           u.strength += heal;
+          if (u.type === "helicopter" && u.strength >= 30) u.isForcedLanding = false;
           sv.supplyCarried = Math.max(0, sv.supplyCarried - heal * 0.5);
           transferred = true;
         }
@@ -1998,15 +2539,54 @@ export class World {
     }
   }
 
+  private isAirborneTarget(u: Unit): boolean {
+    if (u.type === "aircraft") return u.airState !== "turnaround" && u.airState !== "at_base";
+    if (u.type === "helicopter") return !u.isLanded;
+    return false;
+  }
+
+  private canWeaponEngageTarget(attacker: Unit, weapon: Pick<WeaponSlot, "id" | "targetDomain" | "range">, target: Unit, d: number): boolean {
+    if (d > weapon.range) return false;
+    const domain = weapon.targetDomain ?? "ground";
+    const airborne = this.isAirborneTarget(target);
+    if (airborne) {
+      if (domain === "ground") return false;
+      if (weapon.id === "shorad_autocannon" && target.type === "aircraft" && target.flightAltitude === "high") return false;
+      if (attacker.type === "sam" && target.type === "aircraft" && target.flightAltitude === "low" && d > 2800) return false;
+      return true;
+    }
+    return domain === "ground" || domain === "both";
+  }
+
+  private canAnyWeaponEngage(attacker: Unit, target: Unit, d: number): boolean {
+    if (attacker.subRoster) {
+      return !this.isAirborneTarget(target) && attacker.subRoster.weapons.some((w) => w.ammoRemaining > 0 && d <= w.weapon.range);
+    }
+    return attacker.weapons.some((w) => w.ammoRemaining > 0 && this.canWeaponEngageTarget(attacker, w, target, d));
+  }
+
   // ---------- Phase 2B direct-fire combat, accuracy tiers, armor & penetration ----------
-  computeSlotHitChance(attacker: Unit, slot: Pick<WeaponSlot, "accuracy" | "range">, target: Unit, distance: number, efficiency = 1.0): number {
+  computeSlotHitChance(attacker: Unit, slot: Pick<WeaponSlot, "accuracy" | "range"> & { id?: string }, target: Unit, distance: number, efficiency = 1.0): number {
     const perc = attacker.ownPerception.get(target.id) ?? "none";
     const opticsMult = OWN_PERCEPTION_ACCURACY[perc];
     const attMods = this.unitModifiers(attacker);
-    const stateMult = attacker.state === "moving" ? 0.65 : attacker.state === "pinned" ? 0.45 : 1.0;
+    const stateMult = attacker.type === "aircraft" ? 1.0 : attacker.state === "moving" ? 0.65 : attacker.state === "pinned" ? 0.45 : 1.0;
     const suppMult = Math.max(0.25, 1 - attacker.suppression / 160);
     const moraleAccMult = 0.5 + 0.5 * (attacker.morale / 100);
     const rangeMult = Math.max(0.5, 1 - 0.35 * (distance / Math.max(1, slot.range)));
+
+    let airMult = 1.0;
+    if (this.isAirborneTarget(target)) {
+      if (attacker.type === "sam") {
+        airMult = target.type === "aircraft" && target.flightAltitude === "high" ? 1.15 : 0.22;
+      } else if (attacker.type === "shorad") {
+        airMult = target.type === "aircraft" && target.flightAltitude === "high" ? 0.1 : 1.0;
+      } else if (attacker.type === "aircraft" && target.type === "aircraft") {
+        if (attacker.flightAltitude === "high" && target.flightAltitude === "low") airMult = 1.4;
+        else if (attacker.flightAltitude === "low" && target.flightAltitude === "high") airMult = 0.75;
+      }
+    }
+
     const raw =
       slot.accuracy *
       opticsMult *
@@ -2016,7 +2596,8 @@ export class World {
       suppMult *
       stateMult *
       (attMods.attackMult ?? 1) *
-      rangeMult;
+      rangeMult *
+      airMult;
     return Math.min(0.95, Math.max(0.04, raw));
   }
 
@@ -2035,7 +2616,7 @@ export class World {
     for (const e of this.onMapAlive()) {
       if (e.side === u.side || e.embarkedIn) continue;
       const d = dist(u.pos, e.pos);
-      if (d > maxR) continue;
+      if (d > maxR || !this.canAnyWeaponEngage(u, e, d)) continue;
       const own = u.ownPerception.get(e.id) ?? "none";
       if (own === "none") {
         const shared = this.contacts[u.side].get(e.id);
@@ -2050,7 +2631,11 @@ export class World {
 
   private selectVehicleSlotsToFire(u: Unit, target: Unit, d: number): WeaponSlot[] {
     const ready = u.weapons.filter(
-      (w) => w.cooldown <= 0 && w.ammoRemaining > 0 && (!w.mutexGroup || (u.mutexCooldowns.get(w.mutexGroup) ?? 0) <= 0) && d <= w.range,
+      (w) =>
+        w.cooldown <= 0 &&
+        w.ammoRemaining > 0 &&
+        (!w.mutexGroup || (u.mutexCooldowns.get(w.mutexGroup) ?? 0) <= 0) &&
+        this.canWeaponEngageTarget(u, w, target, d),
     );
     const chosen: WeaponSlot[] = [];
     const seenMutex = new Set<string>();
@@ -2199,7 +2784,11 @@ export class World {
 
     const targetMods = this.unitModifiers(target);
     const fromZ = this.map.elevationAt(u.pos) + this.unitEyeHeight(u);
-    const targetH = target.garrison ? this.unitEyeHeight(target) : target.traits.includes("armored") ? 1.4 : 0.8;
+    const targetH = this.isAirborneTarget(target) || target.garrison
+      ? this.unitEyeHeight(target)
+      : target.traits.includes("armored")
+        ? 1.4
+        : 0.8;
     for (const s of shots) {
       if (target.state === "destroyed") break;
       const hitChance = this.computeSlotHitChance(u, s.slot, target, d, s.efficiency);
@@ -2209,7 +2798,15 @@ export class World {
       let dmg = 0;
       let supp = 0;
       if (penetrated) {
-        dmg = s.slot.damage * (0.85 + 0.3 * this.random()) * (targetMods.damageMult ?? 1);
+        let airDmgMult = 1.0;
+        if (u.type === "aircraft" && target.type === "aircraft" && u.flightAltitude === "high" && target.flightAltitude === "low") {
+          airDmgMult = 1.25;
+        } else if (u.type === "sam" && target.type === "aircraft" && target.flightAltitude === "low") {
+          airDmgMult = 0.6;
+        } else if (u.type === "shorad" && target.type === "aircraft" && target.flightAltitude === "high") {
+          airDmgMult = 0.4;
+        }
+        dmg = s.slot.damage * (0.85 + 0.3 * this.random()) * (targetMods.damageMult ?? 1) * airDmgMult;
         supp = s.slot.suppression * (targetMods.suppressionMult ?? 1);
       } else if (hit || s.slot.ammo === "HE") {
         // Non-penetration: 0 HP damage, suppression only
@@ -2393,6 +2990,23 @@ export class World {
         this.emit("casualties", u, `casualties, now at about ${mark}% strength`);
       }
     }
+    // Helicopter ForcedLanding (< 30% HP) when remaining HP >= 8 and not burst-overkilled
+    if (u.type === "helicopter" && !u.isLanded && !u.isForcedLanding && u.strength < 30 && u.strength >= 8 && dmg < 45) {
+      u.isForcedLanding = true;
+      u.isLanded = true;
+      u.order = { kind: "hold" };
+      u.state = "holding";
+      for (const pid of [...u.embarkedIds]) {
+        const p = this.get(pid);
+        if (p) {
+          this.disembark(p);
+          if (p.state !== "destroyed") this.hit(p, 4, 12, by);
+        }
+      }
+      this.emit("forced_landing", u, `${u.id} forced-landed (<30% HP); embarked infantry evacuated`);
+      return;
+    }
+
     if (u.strength < 8) {
       this.vacateBuilding(u);
       for (const pid of [...u.embarkedIds]) {
@@ -2479,7 +3093,8 @@ export class World {
     u.suppression = Math.max(0, u.suppression - (recentlyHit ? 0.7 : 3));
     this.updateMoraleAndEvents(u, recentlyHit);
 
-    if (u.state !== "broken" && !u.embarkedIn && u.order.kind !== "withdraw_off_map" && (u.strength < 30 || u.morale < 20)) {
+    const isAirExempt = u.type === "aircraft" || (u.type === "helicopter" && u.isForcedLanding);
+    if (!isAirExempt && u.state !== "broken" && !u.embarkedIn && u.order.kind !== "withdraw_off_map" && (u.strength < 30 || u.morale < 20)) {
       if (u.garrison) this.vacateBuilding(u);
       u.fireMission = undefined;
       u.state = "broken";
@@ -2487,6 +3102,7 @@ export class World {
       u.order = { kind: "withdraw", dest: u.rally };
       this.emit("broken", u, "unit is combat ineffective and falling back on its own");
     }
+    if (u.type === "aircraft") return;
     if (u.state === "moving" || u.state === "holding") {
       if (u.suppression > 60 && u.order.kind !== "withdraw" && u.order.kind !== "withdraw_off_map") {
         u.state = "pinned";
@@ -2508,7 +3124,7 @@ export class World {
       u.state = standoff ? "holding" : "moving";
     }
 
-    if (!u.embarkedIn && (u.state === "moving" || u.state === "broken") && u.order.dest && u.order.kind !== "fire_mission") {
+    if (!u.embarkedIn && !(u.type === "helicopter" && u.isLanded) && (u.state === "moving" || u.state === "broken") && u.order.dest && u.order.kind !== "fire_mission") {
       u.settledTicks = 0;
       this.move(u, u.order.dest);
     } else {
@@ -2517,6 +3133,7 @@ export class World {
   }
 
   private canOccupy(u: Unit, p: Vec): boolean {
+    if (u.type === "helicopter" && !u.isLanded) return this.map.inBounds(p);
     if (!this.map.inBounds(p) || !this.map.isPassable(p, u.mobility)) return false;
     const bld = this.map.buildingAt(p);
     if (!bld) return true;
@@ -2558,7 +3175,8 @@ export class World {
         return;
       }
     }
-    const speedMult = this.map.terrainDefAt(u.pos).speedMultiplier;
+    const isFlyingHelo = u.type === "helicopter" && !u.isLanded;
+    const speedMult = isFlyingHelo ? 1.0 : this.map.terrainDefAt(u.pos).speedMultiplier;
     const moraleSpeedMult = u.state === "broken" ? 1.0 : 0.65 + 0.35 * (u.morale / 100);
     const kmh = STATS[u.type].baseSpeedKmH * speedMult * moraleSpeedMult;
     const step = (kmh / 3.6) * (u.suppression > 30 ? 0.5 : 1);

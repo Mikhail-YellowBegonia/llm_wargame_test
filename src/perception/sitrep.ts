@@ -35,6 +35,9 @@ function orderWord(world: World, u: Unit) {
   if (o.kind === "withdraw_off_map") {
     return `withdraw off-map to ${o.destName ?? "map edge"}`;
   }
+  if (o.kind === "air_sortie") {
+    return `air sortie (${o.missionProfile ?? u.missionProfile ?? "cap_loiter"}) to grid ${world.map.toGrid(o.dest)}`;
+  }
   return `${o.kind} to ${o.destName ? o.destName + " " : ""}grid ${world.map.toGrid(o.dest)}`;
 }
 
@@ -46,6 +49,12 @@ export function companySitrep(world: World, commander: string, pendingOrders?: R
     if (u.state === "destroyed") { lines.push(`- ${u.id} (${STATS[u.type].label}): DESTROYED / no contact`); continue; }
     if (u.offMapReconstituteAt !== undefined) {
       lines.push(`- ${u.id} (${STATS[u.type].label}): off-map reconstituting (returns in ${Math.max(0, u.offMapReconstituteAt - world.t)}s)`);
+      continue;
+    }
+    if (u.type === "aircraft" && (u.airState === "turnaround" || u.airState === "at_base")) {
+      const tm = u.turnaroundTimers;
+      const timerTxt = tm ? `refuel ${tm.refuelTime}s / repair ${tm.repairTime}s / rearm ${tm.rearmTime}s` : "ready at base";
+      lines.push(`- ${u.id} (${STATS[u.type].label}): ${u.airState} (${timerTxt})`);
       continue;
     }
     const supp = u.suppression >= 15 ? `, suppressed ${Math.round(u.suppression)}%` : "";

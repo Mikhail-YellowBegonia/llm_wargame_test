@@ -23,6 +23,10 @@ const SIDC: Record<"blue" | "red", Record<UnitType, string>> = {
     recon: "10031000141213000000",
     fob: "10031000141600000000",
     supply_truck: "10031000141606000000",
+    shorad: "10031000141301000000",
+    sam: "10031000141301010000",
+    helicopter: "10030100141100000000",
+    aircraft: "10030100141101000000",
   },
   red: {
     tank: "10061000141205000000",
@@ -34,6 +38,10 @@ const SIDC: Record<"blue" | "red", Record<UnitType, string>> = {
     recon: "10061000141213000000",
     fob: "10061000141600000000",
     supply_truck: "10061000141606000000",
+    shorad: "10061000141301000000",
+    sam: "10061000141301010000",
+    helicopter: "10060100141100000000",
+    aircraft: "10060100141101000000",
   },
 };
 
@@ -175,6 +183,7 @@ interface UnitRenderNode {
   tether: THREE.Line;
   sprite: THREE.Sprite;
   orderLine: THREE.Line;
+  rotor?: THREE.Mesh;
   smokeAcc: number;
 }
 
@@ -188,6 +197,8 @@ function createUnitNode(u: Unit): UnitRenderNode {
   const darkMat = new THREE.MeshStandardMaterial({ color: "#1f2937", roughness: 0.85 });
   const hullMats = [bodyMat, turretMat, darkMat];
   const paxMeshes: THREE.Mesh[] = [];
+
+  let rotor: THREE.Mesh | undefined;
 
   if (u.type === "tank") {
     const chassis = new THREE.Mesh(new THREE.BoxGeometry(10.5, 1.8, 5.2), bodyMat);
@@ -257,6 +268,47 @@ function createUnitNode(u: Unit): UnitRenderNode {
     const cab = new THREE.Mesh(new THREE.BoxGeometry(2.8, 2.0, 3.4), turretMat);
     cab.position.set(3.6, 1.5, 0);
     hullGroup.add(bed, cab);
+  } else if (u.type === "shorad") {
+    const chassis = new THREE.Mesh(new THREE.BoxGeometry(9.2, 1.8, 4.4), bodyMat);
+    chassis.position.set(0, 1.1, 0);
+    const turret = new THREE.Mesh(new THREE.BoxGeometry(3.8, 1.4, 3.4), turretMat);
+    turret.position.set(0, 2.5, 0);
+    const radar = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.4, 2.2), darkMat);
+    radar.position.set(-1.2, 3.6, 0);
+    const gunL = new THREE.Mesh(new THREE.BoxGeometry(4.4, 0.3, 0.3), darkMat);
+    gunL.position.set(2.8, 2.7, -0.8);
+    gunL.rotation.z = 0.35;
+    const gunR = gunL.clone();
+    gunR.position.z = 0.8;
+    hullGroup.add(chassis, turret, radar, gunL, gunR);
+  } else if (u.type === "sam") {
+    const chassis = new THREE.Mesh(new THREE.BoxGeometry(11.0, 2.0, 5.0), bodyMat);
+    chassis.position.set(0, 1.2, 0);
+    const rack = new THREE.Mesh(new THREE.BoxGeometry(6.2, 2.0, 3.6), turretMat);
+    rack.position.set(-1.0, 3.3, 0);
+    rack.rotation.z = 0.48;
+    const dish = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.4, 0.5, 10), darkMat);
+    dish.position.set(2.8, 3.2, 0);
+    dish.rotation.z = Math.PI / 3;
+    hullGroup.add(chassis, rack, dish);
+  } else if (u.type === "helicopter") {
+    const fuse = new THREE.Mesh(new THREE.BoxGeometry(11.5, 2.2, 3.0), bodyMat);
+    fuse.position.set(0.8, 1.8, 0);
+    const tail = new THREE.Mesh(new THREE.BoxGeometry(7.5, 0.8, 0.8), turretMat);
+    tail.position.set(-6.5, 2.2, 0);
+    const stub = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.4, 6.2), darkMat);
+    stub.position.set(0.8, 1.4, 0);
+    rotor = new THREE.Mesh(new THREE.BoxGeometry(15.0, 0.18, 0.8), darkMat);
+    rotor.position.set(0.8, 3.2, 0);
+    hullGroup.add(fuse, tail, stub, rotor);
+  } else if (u.type === "aircraft") {
+    const fuse = new THREE.Mesh(new THREE.BoxGeometry(16.0, 1.6, 2.6), bodyMat);
+    fuse.position.set(0, 0, 0);
+    const wingL = new THREE.Mesh(new THREE.BoxGeometry(7.5, 0.35, 12.0), turretMat);
+    wingL.position.set(-1.0, 0, 0);
+    const tailFin = new THREE.Mesh(new THREE.BoxGeometry(3.2, 3.2, 0.4), darkMat);
+    tailFin.position.set(-6.0, 1.8, 0);
+    hullGroup.add(fuse, wingL, tailFin);
   } else {
     const count = Math.max(4, u.headcount || 4);
     const geo = new THREE.CylinderGeometry(0.6, 0.75, 2.5, 6);
@@ -341,6 +393,7 @@ function createUnitNode(u: Unit): UnitRenderNode {
     tether,
     sprite,
     orderLine,
+    rotor,
     smokeAcc: 0,
   };
 }
@@ -437,10 +490,11 @@ function createVfxManager(vfxGroup: THREE.Group) {
 
     // 2. In-flight projectile
     const d = from.distanceTo(to);
-    const isAtgm = ev.ammo === "HEAT" && ev.weaponClass === "heavy_weapon";
-    const speed = ev.ammo === "AP" ? 900 : isAtgm ? 280 : 450;
+    const isAirShot = ev.fromZ > 15 || ev.toZ > 15;
+    const isAtgm = (ev.ammo === "HEAT" && ev.weaponClass === "heavy_weapon") || isAirShot;
+    const speed = ev.ammo === "AP" ? 900 : isAirShot ? 520 : isAtgm ? 280 : 450;
     const duration = Math.min(isAtgm ? 1.8 : 0.7, Math.max(isAtgm ? 0.15 : 0.08, d / speed));
-    const color = ev.ammo === "AP" ? "#fef08a" : ev.ammo === "HEAT" ? "#fb923c" : "#f97316";
+    const color = isAirShot ? "#38bdf8" : ev.ammo === "AP" ? "#fef08a" : ev.ammo === "HEAT" ? "#fb923c" : "#f97316";
     const mat = new THREE.MeshBasicMaterial({ color });
     const mesh = new THREE.Mesh(isAtgm ? sphereGeo : boltGeo, mat);
     mesh.position.copy(from);
@@ -962,7 +1016,11 @@ export const Sandtable3D: React.FC<Props> = (props) => {
         }
 
         const isBlue = u.side === "blue";
-        const visibleUnit = (isBlue || cur.god || (u.state === "destroyed" && world.contacts.blue.has(u.id))) && u.offMapReconstituteAt === undefined;
+        const airHidden = u.type === "aircraft" && (u.airState === "turnaround" || u.airState === "at_base");
+        const visibleUnit =
+          (isBlue || cur.god || (u.state === "destroyed" && world.contacts.blue.has(u.id))) &&
+          u.offMapReconstituteAt === undefined &&
+          !airHidden;
         if (!visibleUnit || u.embarkedIn) {
           node.root.visible = false;
           node.orderLine.visible = false;
@@ -975,11 +1033,24 @@ export const Sandtable3D: React.FC<Props> = (props) => {
             ? (trackMap.get(u.id) ?? u.pos)
             : { x: lerp(u.prevPos.x, u.pos.x, alpha), y: lerp(u.prevPos.y, u.pos.y, alpha) };
         const interpHeading = isBlue && !liveBlue ? u.heading : lerpAngle(u.prevHeading, u.heading, alpha);
+        const airAlt =
+          u.type === "aircraft"
+            ? (u.flightAltitude === "low" ? 120 : 320)
+            : u.type === "helicopter"
+              ? (u.isLanded ? 0 : 35)
+              : 0;
         const floorOff = u.garrison ? Math.max(0, world.unitEyeHeight(u) - 1.5) : 0;
-        const elev = map.elevationAt(interpPos) + floorOff;
+        const elev = map.elevationAt(interpPos) + floorOff + airAlt;
 
         node.root.position.set(interpPos.x, elev, -interpPos.y);
         node.hullGroup.rotation.y = interpHeading;
+        if (node.rotor && !u.isLanded && u.state !== "destroyed") {
+          node.rotor.rotation.y += dt * 16;
+        }
+        const tetherPos = node.tether.geometry.getAttribute("position") as THREE.BufferAttribute;
+        tetherPos.setXYZ(0, 0, airAlt > 0 ? -airAlt : 3, 0);
+        tetherPos.setXYZ(1, 0, 22, 0);
+        tetherPos.needsUpdate = true;
 
         if (node.paxMeshes.length > 0) {
           node.paxMeshes.forEach((m, idx) => { m.visible = u.state === "destroyed" ? idx < 2 : idx < u.headcount; });

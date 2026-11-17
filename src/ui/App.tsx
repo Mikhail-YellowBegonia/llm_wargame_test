@@ -3,7 +3,7 @@ import { createDeepSeek } from "@ai-sdk/deepseek";
 import { AgentLog, createGame, Game } from "../game";
 import { clock } from "../perception/sitrep";
 import { COMPANY, PLAYER } from "../sim/scenario";
-import { ArtilleryAmmoType, getMoraleTier, isCowering, MoraleEventKind, MoraleTier, OrderKind, Roe, Side, STATS, UnitType } from "../sim/world";
+import { AirMissionProfile, ArtilleryAmmoType, getMoraleTier, isCowering, MoraleEventKind, MoraleTier, OrderKind, Roe, Side, STATS, UnitType } from "../sim/world";
 import { LosObserver, Sandtable3D, SimClockState } from "../render/Sandtable3D";
 import { Building, BuildingFloor, MobilityClass, UnitTrait, Vec } from "../sim/map";
 
@@ -40,7 +40,10 @@ const KEY_STORAGE = "wargame_deepseek_key";
 const metaEnv = (import.meta as unknown as { env: { DEV?: boolean; WARGAME_MODEL?: string } }).env;
 const MOBILITIES: readonly MobilityClass[] = ["foot", "wheeled", "tracked", "amphibious"];
 const TRAITS: readonly UnitTrait[] = ["infantry", "vehicle", "armored", "low_profile", "tall_profile"];
-const SPAWN_TYPES: readonly UnitType[] = ["tank", "ifv", "infantry", "atgm", "artillery", "mlrs", "recon", "fob", "supply_truck"];
+const SPAWN_TYPES: readonly UnitType[] = [
+  "tank", "ifv", "infantry", "atgm", "artillery", "mlrs", "recon",
+  "fob", "supply_truck", "shorad", "sam", "helicopter", "aircraft",
+];
 const FIRE_AMMO_TYPES: readonly ArtilleryAmmoType[] = ["HE_Impact", "HE_Airburst", "Smoke"];
 
 export const App: React.FC = () => {
@@ -56,6 +59,7 @@ export const App: React.FC = () => {
   const [aiCommander, setAiCommander] = useState(true);
   const [selectedUnitId, setSelectedUnitId] = useState<string | null>(null);
   const [pendingOrder, setPendingOrder] = useState<"move" | "attack" | "withdraw" | "garrison" | "fire_mission" | null>(null);
+  const [pendingSortie, setPendingSortie] = useState<AirMissionProfile | null>(null);
   const [fireAmmo, setFireAmmo] = useState<ArtilleryAmmoType>("HE_Impact");
   const [spawnMode, setSpawnMode] = useState(false);
   const [spawnSide, setSpawnSide] = useState<Side>("blue");
@@ -150,7 +154,7 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { setPendingOrder(null); setSpawnMode(false); }
+      if (e.key === "Escape") { setPendingOrder(null); setPendingSortie(null); setSpawnMode(false); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -218,6 +222,19 @@ export const App: React.FC = () => {
     if (inspectorMode && !markerMode) {
       setSelectedBuilding(null);
       setLosObserver({ pos, eyeHeight: observerEyeH, label: `Terrain ${grid4} (+${observerEyeH}m)` });
+      return;
+    }
+    if (!inspectorMode && !markerMode && pendingSortie) {
+      const res = game.callAirSortie(spawnSide, pos, pendingSortie);
+      if (res.ok && res.unit) {
+        if (spawnSide === "red" && !god) setGod(true);
+        setSelectedUnitId(res.unit.id);
+        setCommandNote(`${res.unit.id}: ${pendingSortie} (${res.unit.flightAltitude}) → ${grid4}`);
+      } else {
+        setCommandNote(res.reason ?? "air sortie failed");
+      }
+      setPendingSortie(null);
+      setTick((t) => t + 1);
       return;
     }
     if (!inspectorMode && !markerMode && spawnMode) {
@@ -355,7 +372,7 @@ export const App: React.FC = () => {
         god={god}
         markerMode={markerMode}
         inspectorMode={inspectorMode}
-        orderTargetMode={(!!pendingOrder && pendingOrder !== "garrison") || spawnMode}
+        orderTargetMode={(!!pendingOrder && pendingOrder !== "garrison") || spawnMode || !!pendingSortie}
         allowBuildingSelect={
           inspectorMode ||
           (!!selectedUnit && selectedUnit.traits.includes("infantry") && (!pendingOrder || pendingOrder === "garrison"))
@@ -368,7 +385,7 @@ export const App: React.FC = () => {
         onHoverPos={setHoverPos}
         onSelectBuilding={handleSelectBuilding}
         onSelectUnit={handleSelectUnit}
-        onCancelOrder={() => { setPendingOrder(null); setSpawnMode(false); }}
+        onCancelOrder={() => { setPendingOrder(null); setPendingSortie(null); setSpawnMode(false); }}
       />
 
       {/* Top-left flex column stack: prevents top bar wrap from overlapping left HUD card */}
@@ -669,11 +686,27 @@ export const App: React.FC = () => {
           </select>
           <button
             style={{ ...btnStyle(spawnMode), fontSize: 11, padding: "2px 7px" }}
-            onClick={() => { setSpawnMode((s) => !s); setPendingOrder(null); }}
+            onClick={() => { setSpawnMode((s) => !s); setPendingOrder(null); setPendingSortie(null); }}
             title="Click 3D terrain to spawn unit (Esc/right-click cancels)"
           >
             {spawnMode ? "Spawning…" : "+ Spawn"}
           </button>
+          <div style={{ display: "flex", gap: 4, width: "100%", marginTop: 2 }}>
+            <button
+              style={{ ...btnStyle(pendingSortie === "cap_loiter"), fontSize: 10.5, padding: "2px 6px", flex: 1 }}
+              onClick={() => { setPendingSortie((p) => (p === "cap_loiter" ? null : "cap_loiter")); setSpawnMode(false); setPendingOrder(null); }}
+              title="Click 3D map to call CAP sortie (auto high/low altitude)"
+            >
+              {pendingSortie === "cap_loiter" ? "Click Map (CAP)…" : "✈ Call CAP"}
+            </button>
+            <button
+              style={{ ...btnStyle(pendingSortie === "strike_egress"), fontSize: 10.5, padding: "2px 6px", flex: 1 }}
+              onClick={() => { setPendingSortie((p) => (p === "strike_egress" ? null : "strike_egress")); setSpawnMode(false); setPendingOrder(null); }}
+              title="Click 3D map to call Ground Strike sortie"
+            >
+              {pendingSortie === "strike_egress" ? "Click Map (Strike)…" : "✈ Call Strike"}
+            </button>
+          </div>
         </div>
 
         {unitRows.length === 0 ? (
@@ -822,6 +855,50 @@ export const App: React.FC = () => {
                   Fire Mission
                 </button>
               )}
+              {selectedUnit.type === "helicopter" && (
+                <>
+                  <button
+                    style={btnStyle(selectedUnit.isLanded)}
+                    onClick={() => {
+                      const res = selectedUnit.isLanded
+                        ? game.takeoffHelicopter(selectedUnit.id)
+                        : game.landHelicopter(selectedUnit.id);
+                      setCommandNote(res === "ok" ? `${selectedUnit.id}: ${selectedUnit.isLanded ? "landed" : "airborne"}` : res);
+                      setTick((t) => t + 1);
+                    }}
+                  >
+                    {selectedUnit.isLanded ? "Take Off" : "Land"}
+                  </button>
+                  {selectedUnit.isLanded && selectedUnit.embarkedIds.length === 0 && (
+                    <button
+                      style={btnStyle()}
+                      onClick={() => {
+                        const nearInf = world.onMapAlive(selectedUnit.side).find(
+                          (x) => x.traits.includes("infantry") && !x.embarkedIn && Math.hypot(x.pos.x - selectedUnit.pos.x, x.pos.y - selectedUnit.pos.y) <= 200,
+                        );
+                        if (!nearInf) { setCommandNote("No friendly infantry within 200m to embark"); return; }
+                        const res = game.embarkUnit(nearInf.id, selectedUnit.id);
+                        setCommandNote(res === "ok" ? `Embarked ${nearInf.id}` : res);
+                        setTick((t) => t + 1);
+                      }}
+                    >
+                      Embark Inf
+                    </button>
+                  )}
+                  {selectedUnit.embarkedIds.length > 0 && selectedUnit.isLanded && (
+                    <button
+                      style={btnStyle()}
+                      onClick={() => {
+                        for (const pid of [...selectedUnit.embarkedIds]) game.disembarkUnit(pid);
+                        setCommandNote(`${selectedUnit.id}: disembarked troops`);
+                        setTick((t) => t + 1);
+                      }}
+                    >
+                      Disembark
+                    </button>
+                  )}
+                </>
+              )}
               <button
                 style={btnStyle(selectedUnit.order.kind === "hold" && !pendingOrder)}
                 onClick={() => {
@@ -937,6 +1014,22 @@ export const App: React.FC = () => {
               {selectedTelemetry.offMapReconstituteAt !== undefined && (
                 <div style={{ color: "#1d4ed8", fontWeight: 700 }}>
                   OFF-MAP RECONSTITUTING: returns in {Math.max(0, selectedTelemetry.offMapReconstituteAt - world.t)}s
+                </div>
+              )}
+              {selectedUnit.type === "aircraft" && (
+                <div>
+                  air: <b>{selectedTelemetry.airState}</b> · alt: <b>{selectedTelemetry.flightAltitude}</b> · fuel: <b>{Math.round(selectedTelemetry.fuel)}/{selectedTelemetry.maxFuel}</b>
+                  {selectedTelemetry.afterburner ? " · AB" : ""}
+                  {selectedTelemetry.turnaroundTimers && (
+                    <div style={{ color: "#1d4ed8" }}>
+                      turnaround: refuel {selectedTelemetry.turnaroundTimers.refuelTime}s / repair {selectedTelemetry.turnaroundTimers.repairTime}s / rearm {selectedTelemetry.turnaroundTimers.rearmTime}s
+                    </div>
+                  )}
+                </div>
+              )}
+              {selectedUnit.type === "helicopter" && (
+                <div>
+                  helo: <b>{selectedTelemetry.isForcedLanding ? "FORCED LANDED (<30%)" : selectedTelemetry.isLanded ? "LANDED" : "AIRBORNE"}</b>
                 </div>
               )}
               {selectedTelemetry.supplyCapacity > 0 && (
