@@ -4,8 +4,11 @@ import assert from "node:assert/strict";
 import { GameMap, TERRAIN_DEFS, TERRAIN_IDS } from "../src/sim/map";
 import { buildScenario } from "../src/sim/scenario";
 import {
+  FACTION_VARIANTS,
   MORALE_SHAKEN_MIDPOINT,
   MORALE_WORRIED_MIDPOINT,
+  STATS,
+  UnitType,
   World,
   evaluateHePenetration,
   getMoraleTier,
@@ -909,8 +912,60 @@ function verifyPhase3C() {
 verifyPhase3C();
 console.log("Phase 3C fixed-wing (2x airspace, altitude, Afterburner, turnaround), helo ForcedLanding & SAM/SHORAD checks passed.");
 
+function verifyPhase4A() {
+  const m = new GameMap(4000, 4000, 1, { empty: true });
+  const w = new World(m, 61);
+  const allTypes = Object.keys(STATS) as UnitType[];
+  const categories = new Set<string>();
+
+  for (const t of allTypes) {
+    const blue = w.add({ id: `B_${t}`, side: "blue", type: t, pos: { x: 500, y: 500 } });
+    const red = w.add({ id: `R_${t}`, side: "red", type: t, pos: { x: 3500, y: 500 } });
+    assert.notEqual(blue.designation, red.designation, `NATO vs Pact designation must differ for ${t}`);
+    assert.notEqual(blue.shortCode, red.shortCode, `NATO vs Pact shortCode must differ for ${t}`);
+    assert.equal(FACTION_VARIANTS.blue[t].faction, "NATO");
+    assert.equal(FACTION_VARIANTS.red[t].faction, "Pact");
+    categories.add(blue.category);
+  }
+  assert.equal(categories.size, 11, "All 11 functional categories must be represented across FACTION_VARIANTS");
+
+  // Subtle NATO vs Pact doctrinal differences (armor, mutexGroup, mobility, logistics capacity)
+  const m1a1 = w.get("B_tank")!;
+  const t80 = w.get("R_tank")!;
+  assert.ok(m1a1.armor.front.ke > t80.armor.front.ke, "M1A1 must have higher front KE armor than T-80BV");
+  assert.ok(t80.weapons[0].reloadSec < m1a1.weapons[0].reloadSec, "T-80BV autoloader must cycle faster than M1A1");
+
+  const bmp3 = w.get("R_ifv")!;
+  const bradley = w.get("B_ifv")!;
+  assert.equal(bmp3.mobility, "amphibious");
+  assert.equal(bradley.mobility, "tracked");
+  assert.ok(bmp3.weapons.slice(0, 2).every((wp) => wp.mutexGroup === "turret_loader"), "BMP-3 100mm + 30mm must share turret_loader mutexGroup");
+
+  const inf = w.get("B_infantry")!;
+  assert.ok(inf.subRoster?.squads && inf.subRoster.squads.length === 2, "InfantrySubRoster must preserve platoon -> squad hierarchy");
+  assert.ok(w.get("B_supply_truck")!.supplyCapacity > w.get("R_supply_truck")!.supplyCapacity, "HEMTT must carry more than Ural-4320");
+
+  // Combined-arms Fulda Gap scenario validation
+  assert.ok(world.units.length >= 16, "Combined-arms Fulda scenario must populate multi-branch NATO + Pact OOB");
+  assert.equal(world.get("Supply 1")?.supplyCarried, 0, "Blue SupplyVehicle must enter empty (0 supply)");
+  assert.equal(world.get("Red Supply")?.supplyCarried, 0, "Red SupplyVehicle must enter empty (0 supply)");
+  for (const u of world.units) {
+    if (!STATS[u.type].isAirUnit) {
+      assert.equal(world.map.isPassable(u.pos, u.mobility), true, `Combined-arms ground unit ${u.id} must spawn on passable terrain`);
+    }
+  }
+  const skirmish = buildScenario(seed, "skirmish");
+  assert.equal(skirmish.world.units.length, 7, "Legacy skirmish preset must remain available");
+}
+
+verifyPhase4A();
+console.log("Phase 4A 11-category NATO vs Pact OOB & Fulda combined-arms checks passed.");
+
 const objective = map.resolve("Geisa")!;
-for (const u of world.alive("blue")) world.command(u, { kind: "attack", dest: objective, destName: "Geisa" });
+for (const u of world.alive("blue")) {
+  if (u.type === "fob" || u.type === "supply_truck" || u.type === "artillery" || u.type === "mlrs") continue;
+  world.command(u, { kind: "attack", dest: objective, destName: "Geisa" });
+}
 
 const fmt = (t: number) => `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
 world.on((e) => console.log(`[${fmt(e.t)}] ${e.unit}: ${e.text}`));

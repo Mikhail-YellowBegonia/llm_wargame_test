@@ -117,6 +117,18 @@ export interface InfantryWeaponSlot {
   ammoRemaining: number;
 }
 
+export type FactionName = "NATO" | "Pact";
+export type EchelonLevel = "platoon" | "section" | "battery" | "flight" | "node";
+export type FunctionalCategory =
+  | "MBT" | "IFV/APC" | "Line Infantry" | "ATGM" | "Recon"
+  | "Tube Artillery" | "MLRS" | "SHORAD/SAM" | "Helicopter" | "Fixed-Wing" | "Logistics";
+
+export interface SquadMeta {
+  id: string;
+  label: string;
+  roles: Partial<Record<SpecialistRole, number>>;
+}
+
 export interface InfantrySubRoster {
   personnel: Record<SpecialistRole, number>;
   wia: Record<SpecialistRole, number>;
@@ -126,6 +138,7 @@ export interface InfantrySubRoster {
   fieldAidProgress: number;
   weapons: InfantryWeaponSlot[];
   abandonedWeapons: string[];
+  squads?: SquadMeta[];
 }
 
 export interface AssignedInfantryWeapon {
@@ -815,11 +828,189 @@ export const STATS: Record<UnitType, TypeStats> = {
   },
 };
 
+export interface FactionVariant {
+  faction: FactionName;
+  category: FunctionalCategory;
+  echelon: EchelonLevel;
+  designation: string;
+  shortCode: string;
+  mobility?: MobilityClass;
+  baseSignature?: number;
+  baseSpeedKmH?: number;
+  spot?: number;
+  supplyCapacity?: number;
+  armor?: ArmorProfile;
+  weapons?: ReadonlyArray<Omit<WeaponSlot, "cooldown" | "ammoRemaining">>;
+  indirect?: Partial<IndirectProfile>;
+}
+
+const mkWeapon = (
+  base: Omit<WeaponSlot, "cooldown" | "ammoRemaining">,
+  overrides: Partial<Omit<WeaponSlot, "cooldown" | "ammoRemaining">>,
+): Omit<WeaponSlot, "cooldown" | "ammoRemaining"> => ({ ...base, ...overrides });
+
+export const FACTION_VARIANTS: Record<Side, Record<UnitType, FactionVariant>> = {
+  blue: {
+    tank: {
+      faction: "NATO", category: "MBT", echelon: "platoon", designation: "M1A1 Abrams", shortCode: "M1A1",
+      armor: { front: { ke: 18, ce: 22 }, side: { ke: 7, ce: 10 }, rear: { ke: 3, ce: 4 }, top: { ke: 2, ce: 2 } },
+      weapons: [
+        mkWeapon(STATS.tank.weapons[0], { name: "120mm M256 APFSDS", pen: 21 }),
+        mkWeapon(STATS.tank.weapons[1], { name: "120mm M830 HEAT/HE" }),
+        STATS.tank.weapons[2],
+      ],
+    },
+    ifv: {
+      faction: "NATO", category: "IFV/APC", echelon: "platoon", designation: "M2A2 Bradley", shortCode: "M2A2",
+      weapons: [
+        mkWeapon(STATS.ifv.weapons[0], { name: "TOW-2 ATGM", pen: 18, maxAmmo: 7 }),
+        mkWeapon(STATS.ifv.weapons[1], { name: "25mm Bushmaster", pen: 6.5, reloadSec: 1.5 }),
+        STATS.ifv.weapons[2],
+      ],
+    },
+    infantry: { faction: "NATO", category: "Line Infantry", echelon: "platoon", designation: "Mech. Infantry Platoon", shortCode: "MECH INF" },
+    atgm: { faction: "NATO", category: "ATGM", echelon: "section", designation: "TOW-2 Section", shortCode: "TOW-2" },
+    recon: {
+      faction: "NATO", category: "Recon", echelon: "section", designation: "SpPz 2 Luchs", shortCode: "LUCHS",
+      spot: 2900, baseSignature: 0.52,
+      weapons: [mkWeapon(STATS.recon.weapons[0], { name: "20mm Rh 202" }), STATS.recon.weapons[1]],
+    },
+    artillery: {
+      faction: "NATO", category: "Tube Artillery", echelon: "battery", designation: "M109A2 Paladin", shortCode: "M109A2",
+      indirect: { maxRange: 5200, yieldDamage: 38, salvoIntervalSec: 2.2 },
+    },
+    mlrs: {
+      faction: "NATO", category: "MLRS", echelon: "battery", designation: "M270 MLRS", shortCode: "M270",
+      indirect: { baseDispersion: 165, yieldDamage: 32 },
+    },
+    shorad: {
+      faction: "NATO", category: "SHORAD/SAM", echelon: "platoon", designation: "FlakPz Gepard", shortCode: "GEPARD",
+      weapons: [
+        mkWeapon(STATS.shorad.weapons[0], { name: "Stinger / Fliegerfaust" }),
+        mkWeapon(STATS.shorad.weapons[1], { name: "35mm Twin Oerlikon", range: 1700, accuracy: 0.72 }),
+      ],
+    },
+    sam: {
+      faction: "NATO", category: "SHORAD/SAM", echelon: "battery", designation: "Roland II SAM", shortCode: "ROLAND",
+      weapons: [mkWeapon(STATS.sam.weapons[0], { name: "Roland II SAM", accuracy: 0.82 })],
+    },
+    helicopter: {
+      faction: "NATO", category: "Helicopter", echelon: "flight", designation: "AH-1F Cobra", shortCode: "AH-1F",
+      weapons: [
+        mkWeapon(STATS.helicopter.weapons[0], { name: "BGM-71 TOW Heliborne", pen: 19 }),
+        mkWeapon(STATS.helicopter.weapons[1], { name: "20mm M197" }),
+      ],
+    },
+    aircraft: {
+      faction: "NATO", category: "Fixed-Wing", echelon: "flight", designation: "F-4F / A-10A", shortCode: "F-4F",
+      weapons: [
+        mkWeapon(STATS.aircraft.weapons[0], { name: "AIM-9L Sidewinder" }),
+        mkWeapon(STATS.aircraft.weapons[1], { name: "AGM-65 / Mk82" }),
+        STATS.aircraft.weapons[2],
+      ],
+    },
+    fob: { faction: "NATO", category: "Logistics", echelon: "node", designation: "NATO FOB", shortCode: "NATO FOB" },
+    supply_truck: {
+      faction: "NATO", category: "Logistics", echelon: "section", designation: "M977 HEMTT", shortCode: "HEMTT",
+      supplyCapacity: 110,
+    },
+  },
+  red: {
+    tank: {
+      faction: "Pact", category: "MBT", echelon: "platoon", designation: "T-80BV", shortCode: "T-80BV",
+      baseSignature: 0.92,
+      armor: { front: { ke: 16, ce: 23 }, side: { ke: 6, ce: 10 }, rear: { ke: 3, ce: 4 }, top: { ke: 2, ce: 2 } },
+      weapons: [
+        mkWeapon(STATS.tank.weapons[0], { name: "125mm 2A46 APFSDS", pen: 19, reloadSec: 5.5, mutexLockSec: 5.5 }),
+        mkWeapon(STATS.tank.weapons[1], { name: "125mm HE-Frag", pen: 6.5, reloadSec: 5.5, mutexLockSec: 5.5 }),
+        STATS.tank.weapons[2],
+      ],
+    },
+    ifv: {
+      faction: "Pact", category: "IFV/APC", echelon: "platoon", designation: "BMP-3", shortCode: "BMP-3",
+      mobility: "amphibious",
+      weapons: [
+        mkWeapon(STATS.ifv.weapons[0], { name: "100mm 2A70 / Bastion", pen: 16, reloadSec: 7, maxAmmo: 8, mutexGroup: "turret_loader", mutexLockSec: 4 }),
+        mkWeapon(STATS.ifv.weapons[1], { name: "30mm 2A72", pen: 7, mutexGroup: "turret_loader", mutexLockSec: 1.5 }),
+        STATS.ifv.weapons[2],
+      ],
+    },
+    infantry: {
+      faction: "Pact", category: "Line Infantry", echelon: "platoon", designation: "Mot. Rifle Platoon", shortCode: "MOT RIF",
+      baseSignature: 0.48, baseSpeedKmH: 4.2,
+    },
+    atgm: {
+      faction: "Pact", category: "ATGM", echelon: "section", designation: "Konkurs Section", shortCode: "AT-5",
+      baseSignature: 0.42,
+    },
+    recon: {
+      faction: "Pact", category: "Recon", echelon: "section", designation: "BRDM-2 Recon", shortCode: "BRDM-2",
+      mobility: "amphibious", spot: 2750, baseSpeedKmH: 45,
+      weapons: [mkWeapon(STATS.recon.weapons[0], { name: "14.5mm KPVT", pen: 3.8, damage: 6 }), STATS.recon.weapons[1]],
+    },
+    artillery: {
+      faction: "Pact", category: "Tube Artillery", echelon: "battery", designation: "2S1 Gvozdika", shortCode: "2S1",
+      mobility: "amphibious", baseSpeedKmH: 28,
+      indirect: { salvoCount: 5, salvoIntervalSec: 1.8, yieldDamage: 34 },
+    },
+    mlrs: {
+      faction: "Pact", category: "MLRS", echelon: "battery", designation: "BM-21 Grad", shortCode: "BM-21",
+      indirect: { salvoCount: 8, salvoIntervalSec: 0.8, baseDispersion: 195, yieldDamage: 28, maxIndirectAmmo: 16 },
+    },
+    shorad: {
+      faction: "Pact", category: "SHORAD/SAM", echelon: "platoon", designation: "ZSU-23-4 Shilka", shortCode: "ZSU-23",
+      weapons: [
+        mkWeapon(STATS.shorad.weapons[0], { name: "SA-14 Strela", range: 2300 }),
+        mkWeapon(STATS.shorad.weapons[1], { name: "23mm Quad AZP-23", range: 1500, damage: 9, suppression: 15, maxAmmo: 100 }),
+      ],
+    },
+    sam: {
+      faction: "Pact", category: "SHORAD/SAM", echelon: "battery", designation: "9K33 Osa-AKM", shortCode: "OSA-AKM",
+      mobility: "amphibious",
+      weapons: [mkWeapon(STATS.sam.weapons[0], { name: "9M33M3 Osa-AKM", range: 5200, reloadSec: 5.5, maxAmmo: 10 })],
+    },
+    helicopter: {
+      faction: "Pact", category: "Helicopter", echelon: "flight", designation: "Mi-24V Hind", shortCode: "Mi-24V",
+      armor: { front: { ke: 3, ce: 3 }, side: { ke: 2, ce: 2 }, rear: { ke: 1, ce: 1 }, top: { ke: 1, ce: 1 } },
+      weapons: [
+        mkWeapon(STATS.helicopter.weapons[0], { name: "9M114 Shturm" }),
+        mkWeapon(STATS.helicopter.weapons[1], { name: "12.7mm Yak-B" }),
+      ],
+    },
+    aircraft: {
+      faction: "Pact", category: "Fixed-Wing", echelon: "flight", designation: "MiG-23ML / Su-25", shortCode: "MiG-23",
+      baseSpeedKmH: 630,
+      weapons: [
+        mkWeapon(STATS.aircraft.weapons[0], { name: "R-60M Aphid" }),
+        mkWeapon(STATS.aircraft.weapons[1], { name: "S-24 / FAB-250" }),
+        mkWeapon(STATS.aircraft.weapons[2], { name: "23mm GSh-23L" }),
+      ],
+    },
+    fob: { faction: "Pact", category: "Logistics", echelon: "node", designation: "Pact FOB", shortCode: "PACT FOB" },
+    supply_truck: {
+      faction: "Pact", category: "Logistics", echelon: "section", designation: "Ural-4320", shortCode: "URAL",
+      baseSpeedKmH: 38,
+    },
+  },
+};
+
+export function getUnitVariant(side: Side, type: UnitType): FactionVariant {
+  return FACTION_VARIANTS[side][type];
+}
+
+function getIndirectSpec(u: Pick<Unit, "side" | "type">): IndirectProfile | undefined {
+  const base = STATS[u.type].indirect;
+  if (!base) return undefined;
+  const ov = FACTION_VARIANTS[u.side][u.type].indirect;
+  return ov ? { ...base, ...ov } : base;
+}
+
 function emptyRoles(): Record<SpecialistRole, number> {
   return { rifleman: 0, mg_specialist: 0, at_specialist: 0, marksman: 0, engineer: 0 };
 }
 
-function createDefaultSubRoster(type: UnitType): InfantrySubRoster | undefined {
+function createDefaultSubRoster(type: UnitType, side: Side = "blue"): InfantrySubRoster | undefined {
+  const isNato = side === "blue";
   if (type === "infantry") {
     const weapons: InfantryWeaponSlot[] = [
       {
@@ -833,7 +1024,7 @@ function createDefaultSubRoster(type: UnitType): InfantrySubRoster | undefined {
         ammoRemaining: 4,
         weapon: {
           id: "at_launcher",
-          name: "AT Launcher",
+          name: isNato ? "AT-4 / Dragon" : "RPG-7V",
           ammo: "HEAT",
           pen: 12,
           damage: 26,
@@ -856,7 +1047,7 @@ function createDefaultSubRoster(type: UnitType): InfantrySubRoster | undefined {
         ammoRemaining: 40,
         weapon: {
           id: "lmg",
-          name: "Light MG",
+          name: isNato ? "M249 SAW" : "RPK-74 LMG",
           ammo: "HE",
           pen: 2,
           d0: 1.5,
@@ -882,7 +1073,7 @@ function createDefaultSubRoster(type: UnitType): InfantrySubRoster | undefined {
         ammoRemaining: 30,
         weapon: {
           id: `rifle_${i}`,
-          name: "Assault Rifle",
+          name: isNato ? "M16A2 Rifle" : "AK-74 Rifle",
           ammo: "AP",
           pen: 1,
           damage: 2.2,
@@ -904,6 +1095,10 @@ function createDefaultSubRoster(type: UnitType): InfantrySubRoster | undefined {
       fieldAidProgress: 0,
       weapons,
       abandonedWeapons: [],
+      squads: [
+        { id: "sq_1", label: "1st Rifle Squad", roles: { rifleman: 4, mg_specialist: 1 } },
+        { id: "sq_2", label: "2nd Weapons Squad", roles: { rifleman: 2, at_specialist: 1 } },
+      ],
     };
   }
   if (type === "atgm") {
@@ -919,13 +1114,13 @@ function createDefaultSubRoster(type: UnitType): InfantrySubRoster | undefined {
         ammoRemaining: 6,
         weapon: {
           id: "atgm_launcher",
-          name: "ATGM Launcher",
+          name: isNato ? "BGM-71 TOW-2" : "9M113 Konkurs",
           ammo: "HEAT",
-          pen: 18,
+          pen: isNato ? 19 : 17,
           damage: 34,
           suppression: 16,
-          range: 2500,
-          reloadSec: 8,
+          range: isNato ? 2600 : 2400,
+          reloadSec: isNato ? 9 : 7,
           accuracy: 0.78,
           weaponClass: "heavy_weapon",
           muzzleSignature: 1.5,
@@ -944,7 +1139,7 @@ function createDefaultSubRoster(type: UnitType): InfantrySubRoster | undefined {
         ammoRemaining: 30,
         weapon: {
           id: `carbine_${i}`,
-          name: "Carbine",
+          name: isNato ? "M16 Carbine" : "AKS-74U",
           ammo: "AP",
           pen: 1,
           damage: 2,
@@ -966,6 +1161,7 @@ function createDefaultSubRoster(type: UnitType): InfantrySubRoster | undefined {
       fieldAidProgress: 0,
       weapons,
       abandonedWeapons: [],
+      squads: [{ id: "sec_1", label: isNato ? "TOW-2 Team" : "Konkurs Team", roles: { rifleman: 2, at_specialist: 2 } }],
     };
   }
   return undefined;
@@ -975,6 +1171,10 @@ export interface Unit {
   id: string;
   side: Side;
   type: UnitType;
+  designation: string;
+  shortCode: string;
+  category: FunctionalCategory;
+  echelon: EchelonLevel;
   pos: Vec;
   prevPos: Vec;
   heading: number; // radians (0 = East, Math.PI/2 = North)
@@ -1079,6 +1279,9 @@ export interface Contact {
 }
 
 export interface UnitTelemetry {
+  designation: string;
+  category: FunctionalCategory;
+  echelon: EchelonLevel;
   bodySignature: number;
   terrainId: TerrainId;
   modifiers: CombatModifiers;
@@ -1319,6 +1522,7 @@ export class World {
   add(
     u: Omit<
       Unit,
+      | "designation" | "shortCode" | "category" | "echelon"
       | "prevPos" | "heading" | "prevHeading" | "strength" | "suppression" | "morale" | "state" | "lastFiredAt" | "lastHitAt" | "roe" | "order"
       | "mobility" | "traits" | "headcount" | "eyeHeight" | "baseSignature" | "weaponClass" | "muzzleSignature"
       | "settledTicks" | "stuckTicks" | "embarkedIds" | "activeMoraleEvents"
@@ -1328,11 +1532,17 @@ export class World {
     > & Partial<Unit>,
   ) {
     const st = STATS[u.type];
+    const fv = FACTION_VARIANTS[u.side][u.type];
+    const indSpec = getIndirectSpec({ side: u.side, type: u.type });
     const heading = u.heading ?? (u.side === "blue" ? 0 : Math.PI);
-    const maxInd = st.indirect?.maxIndirectAmmo ?? 0;
-    const cap = st.supplyCapacity ?? 0;
+    const maxInd = indSpec?.maxIndirectAmmo ?? 0;
+    const cap = fv.supplyCapacity ?? st.supplyCapacity ?? 0;
     const maxFuel = st.maxFuel ?? Infinity;
     const unit: Unit = {
+      designation: fv.designation,
+      shortCode: fv.shortCode,
+      category: fv.category,
+      echelon: fv.echelon,
       prevPos: { ...u.pos },
       heading,
       prevHeading: heading,
@@ -1344,11 +1554,11 @@ export class World {
       order: { kind: "hold" },
       lastFiredAt: -1e9,
       lastHitAt: -1e9,
-      mobility: st.mobility,
+      mobility: fv.mobility ?? st.mobility,
       traits: [...st.traits],
       headcount: st.headcount,
       eyeHeight: st.eyeHeight,
-      baseSignature: st.baseSignature,
+      baseSignature: fv.baseSignature ?? st.baseSignature,
       weaponClass: st.weaponClass,
       muzzleSignature: st.muzzleSignature,
       settledTicks: 0,
@@ -1356,10 +1566,10 @@ export class World {
       embarkedIds: [],
       activeMoraleEvents: [],
       ownPerception: new Map(),
-      armor: cloneArmor(st.armor),
-      weapons: cloneWeapons(st.weapons),
+      armor: cloneArmor(fv.armor ?? st.armor),
+      weapons: cloneWeapons(fv.weapons ?? st.weapons),
       mutexCooldowns: new Map(),
-      subRoster: createDefaultSubRoster(u.type),
+      subRoster: createDefaultSubRoster(u.type, u.side),
       hasObserver: st.hasObserver,
       isPositionCalibrated: false,
       indirectAmmo: maxInd,
@@ -1575,8 +1785,8 @@ export class World {
   }
 
   private startFireMission(u: Unit, dest: Vec, ammoType?: ArtilleryAmmoType): string {
-    const spec = STATS[u.type].indirect;
-    if (!spec) return `${u.id} (${STATS[u.type].label}) cannot execute indirect fire missions`;
+    const spec = getIndirectSpec(u);
+    if (!spec) return `${u.id} (${u.designation}) cannot execute indirect fire missions`;
     const d = dist(u.pos, dest);
     if (d < spec.minRange || d > spec.maxRange) {
       return `target out of indirect range (${Math.round(d)}m; valid ${spec.minRange}–${spec.maxRange}m)`;
@@ -1755,7 +1965,8 @@ export class World {
   }
 
   effectiveSpotRange(u: Unit): number {
-    return STATS[u.type].spot * (isCowering(u) ? COWERING_OPTICS_MULT : 1.0);
+    const baseSpot = FACTION_VARIANTS[u.side][u.type].spot ?? STATS[u.type].spot;
+    return baseSpot * (isCowering(u) ? COWERING_OPTICS_MULT : 1.0);
   }
 
   computeBodySignature(u: Unit): number {
@@ -1963,6 +2174,9 @@ export class World {
           mutexLocked: !!w.mutexGroup && (u.mutexCooldowns.get(w.mutexGroup) ?? 0) > 0,
         }));
     return {
+      designation: u.designation,
+      category: u.category,
+      echelon: u.echelon,
       bodySignature: this.computeBodySignature(u),
       terrainId: this.map.terrainIdAt(u.pos),
       modifiers: this.unitModifiers(u),
@@ -2091,7 +2305,8 @@ export class World {
 
       const dest = u.airState === "egress" ? (u.order.dest ?? this.nearestAirExit(u.pos)) : (u.sortieTarget ?? u.order.dest);
       if (dest) {
-        const airStep = st.baseSpeedKmH / 3.6;
+        const airSpeed = FACTION_VARIANTS[u.side][u.type].baseSpeedKmH ?? st.baseSpeedKmH;
+        const airStep = airSpeed / 3.6;
         const d = dist(u.pos, dest);
         if (u.airState === "egress") {
           const ang = Math.atan2(dest.y - u.pos.y, dest.x - u.pos.x);
@@ -2340,7 +2555,7 @@ export class World {
       fm.cooldown = Math.max(0, fm.cooldown - this.moraleRofRate(u));
       if (fm.cooldown > 0) return;
     }
-    const spec = STATS[u.type].indirect;
+    const spec = getIndirectSpec(u);
     if (!spec) { u.fireMission = undefined; return; }
     if (u.indirectAmmo <= 0) {
       u.fireMission = undefined;
@@ -3178,7 +3393,8 @@ export class World {
     const isFlyingHelo = u.type === "helicopter" && !u.isLanded;
     const speedMult = isFlyingHelo ? 1.0 : this.map.terrainDefAt(u.pos).speedMultiplier;
     const moraleSpeedMult = u.state === "broken" ? 1.0 : 0.65 + 0.35 * (u.morale / 100);
-    const kmh = STATS[u.type].baseSpeedKmH * speedMult * moraleSpeedMult;
+    const baseSpeed = FACTION_VARIANTS[u.side][u.type].baseSpeedKmH ?? STATS[u.type].baseSpeedKmH;
+    const kmh = baseSpeed * speedMult * moraleSpeedMult;
     const step = (kmh / 3.6) * (u.suppression > 30 ? 0.5 : 1);
     if (step <= 0) return;
 
