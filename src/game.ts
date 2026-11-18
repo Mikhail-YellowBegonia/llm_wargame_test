@@ -48,7 +48,7 @@ export function createGame(model: LanguageModel, hooks: GameHooks, seed = 7) {
   let spawnSeq = 0;
   let result: "win" | "loss" | undefined;
   let inspectorMode = false;
-  let aiCommanderEnabled = true;
+  let aiCommanderEnabled = false;
 
   return {
     world, picture, battalionNet, commander: alpha6,

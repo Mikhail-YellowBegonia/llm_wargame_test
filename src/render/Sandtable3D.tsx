@@ -367,7 +367,8 @@ function createUnitNode(u: Unit): UnitRenderNode {
   root.add(tether);
 
   const prefix = u.id.replace("Alpha ", "A").replace("Blue ", "B").replace("Red ", "R");
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: getUnitTexture(u.side, u.type, prefix), depthTest: false }));
+  const label = u.shortCode ? `${prefix} · ${u.shortCode}` : prefix;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: getUnitTexture(u.side, u.type, label), depthTest: false }));
   sprite.position.set(0, 26, 0);
   sprite.scale.set(82, 82, 1);
   sprite.userData = { unitId: u.id, side: u.side };

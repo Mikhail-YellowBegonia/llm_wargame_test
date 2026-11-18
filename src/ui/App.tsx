@@ -3,7 +3,7 @@ import { createDeepSeek } from "@ai-sdk/deepseek";
 import { AgentLog, createGame, Game } from "../game";
 import { clock } from "../perception/sitrep";
 import { COMPANY, PLAYER } from "../sim/scenario";
-import { AirMissionProfile, ArtilleryAmmoType, getMoraleTier, isCowering, MoraleEventKind, MoraleTier, OrderKind, Roe, Side, STATS, UnitType } from "../sim/world";
+import { AirMissionProfile, ArtilleryAmmoType, FACTION_VARIANTS, getMoraleTier, isCowering, MoraleEventKind, MoraleTier, OrderKind, Roe, Side, STATS, UnitType } from "../sim/world";
 import { LosObserver, Sandtable3D, SimClockState } from "../render/Sandtable3D";
 import { Building, BuildingFloor, MobilityClass, UnitTrait, Vec } from "../sim/map";
 
@@ -56,7 +56,8 @@ export const App: React.FC = () => {
   const [losObserver, setLosObserver] = useState<LosObserver | null>(null);
   const [selectedBuilding, setSelectedBuilding] = useState<{ building: Building; floorLevel: number } | null>(null);
   const [god, setGod] = useState(false);
-  const [aiCommander, setAiCommander] = useState(true);
+  const [aiCommander, setAiCommander] = useState(false);
+  const [showLlmPanel, setShowLlmPanel] = useState(false);
   const [selectedUnitId, setSelectedUnitId] = useState<string | null>(null);
   const [pendingOrder, setPendingOrder] = useState<"move" | "attack" | "withdraw" | "garrison" | "fire_mission" | null>(null);
   const [pendingSortie, setPendingSortie] = useState<AirMissionProfile | null>(null);
@@ -318,6 +319,7 @@ export const App: React.FC = () => {
   const unitRows: {
     id: string;
     type: keyof typeof STATS;
+    designation: string;
     state: string;
     strength: number;
     engaging: boolean;
@@ -331,6 +333,7 @@ export const App: React.FC = () => {
         .map((u) => ({
           id: u.id,
           type: u.type,
+          designation: u.designation,
           state: u.state,
           strength: u.strength,
           engaging: !!u.target,
@@ -339,7 +342,10 @@ export const App: React.FC = () => {
           suppression: u.suppression,
           moraleEvents: u.activeMoraleEvents,
         }))
-    : picture.status;
+    : picture.status.map((s) => ({
+        ...s,
+        designation: world.get(s.id)?.designation ?? STATS[s.type].label,
+      }));
 
   const redRows = god
     ? world.units
@@ -347,6 +353,7 @@ export const App: React.FC = () => {
         .map((u) => ({
           id: u.id,
           type: u.type,
+          designation: u.designation,
           state: u.state,
           strength: u.strength,
           engaging: !!u.target,
@@ -395,7 +402,7 @@ export const App: React.FC = () => {
           top: 16,
           left: 16,
           bottom: 58,
-          maxWidth: "calc(100vw - 380px)",
+          maxWidth: showLlmPanel ? "calc(100vw - 380px)" : "calc(100vw - 32px)",
           display: "flex",
           flexDirection: "column",
           alignItems: "flex-start",
@@ -466,50 +473,73 @@ export const App: React.FC = () => {
           />
         )}
         <span style={{ color: "#786f60" }}>|</span>
-        <button
-          style={{ ...btnStyle(aiCommander), background: aiCommander ? "#15803d" : "#b45309", color: "#fff" }}
-          onClick={toggleAiCommander}
-          title="Toggle Alpha 6 LLM Commander ON/OFF (OFF runs direct-command sandbox without API key)"
-        >
-          AI Commander: {aiCommander ? "ON" : "OFF"}
-        </button>
         <button style={btnStyle(god)} onClick={toggleGod} title="Debug: show ground-truth positions & allow selecting Red units">
           God
         </button>
-        <button style={btnStyle(showDebug)} onClick={() => setShowDebug((d) => !d)} title="Debug: LLM context & tool calls">
-          LLM Debug
+        <button style={btnStyle(paused)} onClick={() => setPaused((p) => !p)} title="Pause or resume simulation ticks">
+          {paused ? "Resume" : "Pause"}
         </button>
-        {showDebug && (
-          <button style={btnStyle(paused)} onClick={() => setPaused((p) => !p)}>
-            {paused ? "Resume" : "Pause (dbg)"}
-          </button>
-        )}
-        <span style={{ color: "#786f60" }}>|</span>
         <button
-          style={{
-            ...btnStyle(showKeyInput),
-            borderColor: !metaEnv.DEV && !apiKey.trim() ? "#b45309" : "#9e9381",
-          }}
-          onClick={() => setShowKeyInput((k) => !k)}
-          title="Set DeepSeek API key (saved in browser localStorage; optional in local dev)"
+          style={btnStyle(showLlmPanel)}
+          onClick={() => setShowLlmPanel((p) => !p)}
+          title="Show/hide BATTALION NET chat, AI Commander toggle, API Key, and LLM Debug tools"
         >
-          {apiKey.trim() ? "API Key ✓" : metaEnv.DEV ? "API Key (env)" : "API Key !"}
+          LLM Panel
         </button>
-        {showKeyInput && (
-          <input
-            type="password"
-            value={apiKey}
-            onChange={(e) => updateApiKey(e.target.value)}
-            placeholder="sk-... (DeepSeek API key)"
+        {showLlmPanel && (
+          <>
+            <span style={{ color: "#786f60" }}>|</span>
+            <button
+              style={{ ...btnStyle(aiCommander), background: aiCommander ? "#15803d" : "#b45309", color: "#fff" }}
+              onClick={toggleAiCommander}
+              title="Toggle Alpha 6 LLM Commander ON/OFF (OFF runs direct-command sandbox without API key)"
+            >
+              AI Commander: {aiCommander ? "ON" : "OFF"}
+            </button>
+            <button style={btnStyle(showDebug)} onClick={() => setShowDebug((d) => !d)} title="Debug: LLM context & tool calls">
+              LLM Debug
+            </button>
+            <button
+              style={{
+                ...btnStyle(showKeyInput),
+                borderColor: !metaEnv.DEV && !apiKey.trim() ? "#b45309" : "#9e9381",
+              }}
+              onClick={() => setShowKeyInput((k) => !k)}
+              title="Set DeepSeek API key (saved in browser localStorage; optional in local dev)"
+            >
+              {apiKey.trim() ? "API Key ✓" : metaEnv.DEV ? "API Key (env)" : "API Key !"}
+            </button>
+            {showKeyInput && (
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(e) => updateApiKey(e.target.value)}
+                placeholder="sk-... (DeepSeek API key)"
+                style={{
+                  padding: "3px 7px",
+                  fontSize: 12,
+                  border: "1px solid #9e9381",
+                  borderRadius: 4,
+                  background: "#fffdf8",
+                  width: 175,
+                }}
+              />
+            )}
+          </>
+        )}
+        {game.result && !showLlmPanel && (
+          <span
             style={{
-              padding: "3px 7px",
-              fontSize: 12,
-              border: "1px solid #9e9381",
+              padding: "2px 8px",
               borderRadius: 4,
-              background: "#fffdf8",
-              width: 175,
+              fontWeight: 700,
+              fontSize: 12,
+              background: game.result === "win" ? "#dcfce7" : "#fee2e2",
+              color: game.result === "win" ? "#14532d" : "#7f1d1d",
             }}
-          />
+          >
+            {game.result === "win" ? "VICTORY — Geisa Secured" : "DEFEAT — Alpha Co. Combat Ineffective"}
+          </span>
         )}
       </div>
 
@@ -681,7 +711,7 @@ export const App: React.FC = () => {
             style={{ fontSize: 11, padding: "2px 4px", borderRadius: 3, border: "1px solid #9e9381", background: "#fffdf8", flex: 1, minWidth: 80 }}
           >
             {SPAWN_TYPES.map((t) => (
-              <option key={t} value={t}>{t}</option>
+              <option key={t} value={t}>{t} ({FACTION_VARIANTS[spawnSide][t].shortCode})</option>
             ))}
           </select>
           <button
@@ -734,7 +764,7 @@ export const App: React.FC = () => {
                     {stateBadge(u.state)}
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, color: "#524a3e", fontSize: 11 }}>
-                    <span>{STATS[u.type].label}</span>
+                    <span>{u.designation}</span>
                     <span style={{ fontFamily: "ui-monospace, monospace" }}>
                       str {Math.round(u.strength)}%{u.suppression !== undefined ? ` · sup ${Math.round(u.suppression)}%` : ""}{u.engaging ? " · ENG" : ""}
                     </span>
@@ -778,7 +808,7 @@ export const App: React.FC = () => {
                       {stateBadge(u.state)}
                     </div>
                     <div style={{ display: "flex", justifyContent: "space-between", marginTop: 2, color: "#524a3e", fontSize: 10.5 }}>
-                      <span>{STATS[u.type].label}</span>
+                      <span>{u.designation}</span>
                       <span style={{ fontFamily: "ui-monospace, monospace" }}>
                         str {Math.round(u.strength)}% · sup {Math.round(u.suppression)}%
                       </span>
@@ -794,7 +824,10 @@ export const App: React.FC = () => {
         {selectedUnit && selectedTelemetry && (
           <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid #cfc6b4", display: "flex", flexDirection: "column", gap: 6 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <strong style={{ fontSize: 12 }}>DIRECT ORDER: {selectedUnit.id}</strong>
+              <div>
+                <strong style={{ fontSize: 12 }}>DIRECT ORDER: {selectedUnit.id}</strong>
+                <div style={{ fontSize: 10.5, color: "#524a3e" }}>{selectedTelemetry.designation} · {selectedTelemetry.category} ({selectedTelemetry.echelon})</div>
+              </div>
               <div style={{ display: "flex", gap: 4 }}>
                 <button
                   style={{ ...btnStyle(), padding: "1px 6px", background: "#fee2e2", color: "#991b1b", borderColor: "#fca5a5" }}
@@ -1139,7 +1172,8 @@ export const App: React.FC = () => {
       )}
       </div>
 
-      {/* Right floating window: Radio Net */}
+      {/* Right floating window: Radio Net (hidden behind LLM Panel toggle by default) */}
+      {showLlmPanel && (
       <div
         style={{
           ...panelStyle,
@@ -1275,9 +1309,10 @@ export const App: React.FC = () => {
           </button>
         </form>
       </div>
+      )}
 
       {/* Optional Debug Drawer: LLM Context, Tool Calls, & Company Net */}
-      {showDebug && (
+      {showLlmPanel && showDebug && (
         <div
           style={{
             ...panelStyle,
