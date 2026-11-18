@@ -57,6 +57,7 @@ export const App: React.FC = () => {
   const [selectedBuilding, setSelectedBuilding] = useState<{ building: Building; floorLevel: number } | null>(null);
   const [god, setGod] = useState(false);
   const [aiCommander, setAiCommander] = useState(false);
+  const [autoSupport, setAutoSupport] = useState(true);
   const [showLlmPanel, setShowLlmPanel] = useState(false);
   const [selectedUnitId, setSelectedUnitId] = useState<string | null>(null);
   const [pendingOrder, setPendingOrder] = useState<"move" | "attack" | "withdraw" | "garrison" | "fire_mission" | null>(null);
@@ -476,6 +477,17 @@ export const App: React.FC = () => {
         <button style={btnStyle(god)} onClick={toggleGod} title="Debug: show ground-truth positions & allow selecting Red units">
           God
         </button>
+        <button
+          style={{ ...btnStyle(autoSupport), background: autoSupport ? "#0f766e" : "#ede6d6", color: autoSupport ? "#fff" : "#221e17" }}
+          onClick={() => {
+            const next = !autoSupport;
+            setAutoSupport(next);
+            game.setAutoSupportEnabled(next);
+          }}
+          title="Toggle autonomous SupportBroker dispatch (artillery smoke/HE, air strikes, FOB-to-front resupply)"
+        >
+          Auto Support: {autoSupport ? "ON" : "OFF"}
+        </button>
         <button style={btnStyle(paused)} onClick={() => setPaused((p) => !p)} title="Pause or resume simulation ticks">
           {paused ? "Resume" : "Pause"}
         </button>
@@ -782,6 +794,26 @@ export const App: React.FC = () => {
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {world.supportRequests.some((r) => god || r.side === "blue") && (
+          <div style={{ marginTop: 8, paddingTop: 6, borderTop: "1px solid #cfc6b4", fontSize: 10.5, fontFamily: "ui-monospace, monospace" }}>
+            <strong>SUPPORT BROKER ({world.supportRequests.filter((r) => (god || r.side === "blue") && (r.status === "pending" || r.status === "assigned")).length} active)</strong>
+            <div style={{ display: "flex", flexDirection: "column", gap: 3, marginTop: 4 }}>
+              {world.supportRequests
+                .filter((r) => god || r.side === "blue")
+                .slice(-5)
+                .reverse()
+                .map((r) => (
+                  <div key={r.id} style={{ padding: "3px 5px", background: "rgba(235, 229, 215, 0.7)", borderRadius: 3 }}>
+                    <span>[{r.kind}] <b>{r.requesterId}</b> → <b>{r.assignedResponderId ?? "queued"}</b></span>{" "}
+                    <span style={{ color: r.status === "completed" ? "#15803d" : r.status === "assigned" ? "#1d4ed8" : "#b45309" }}>
+                      ({r.status} · u{r.urgency})
+                    </span>
+                  </div>
+                ))}
+            </div>
           </div>
         )}
 

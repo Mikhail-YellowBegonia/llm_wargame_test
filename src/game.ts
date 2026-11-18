@@ -58,6 +58,8 @@ export function createGame(model: LanguageModel, hooks: GameHooks, seed = 7) {
     setInspectorMode(enabled: boolean) { inspectorMode = enabled; },
     get aiCommanderEnabled() { return aiCommanderEnabled; },
     setAiCommanderEnabled(enabled: boolean) { aiCommanderEnabled = enabled; },
+    get autoSupportEnabled() { return world.autoSupportEnabled; },
+    setAutoSupportEnabled(enabled: boolean) { world.autoSupportEnabled = enabled; },
     /** Direct sandbox command bypassing radio/LLM latency. */
     directCommand(unitId: string, order: Order, roe?: Roe) {
       const u = world.get(unitId);

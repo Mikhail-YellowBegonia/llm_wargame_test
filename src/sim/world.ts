@@ -29,16 +29,24 @@ export const DEFAULT_LEASH_RADIUS = 140;
 export type SupportRequestKind =
   | "artillery_he" | "artillery_smoke" | "air_strike"
   | "resupply_repairs" | "transport_pickup" | "armor_support";
+export type SupportRequestStatus = "pending" | "assigned" | "completed" | "expired";
 
 export interface SupportRequest {
   id: string;
   requesterId: string;
+  side: Side;
   kind: SupportRequestKind;
   targetPos: Vec;
   urgency: number;
   hasObserverSight: boolean;
   createdAt: number;
   ttl: number;
+  assignedResponderId?: string;
+  status: SupportRequestStatus;
+}
+
+export interface SupportBroker {
+  assignRequests(world: World): void;
 }
 
 export interface Order {
@@ -83,6 +91,8 @@ export interface UnitTacticalContext {
     nearbyCoverCandidates: Vec[];
     nearbyBuildings: { id: string; pos: Vec; floor: number }[];
     incomingArtilleryWarning: boolean;
+    availableSupport: SupportRequestKind[];
+    hasObserverSight: boolean;
   };
   threatsAndTargets: {
     id: string;
@@ -1306,6 +1316,8 @@ export interface Unit {
   tacticalDest?: Vec;
   lastTacticalAction?: TacticalAction;
   defensiveSmokeCooldownUntil?: number;
+  assignedSupportId?: string;
+  supportCooldowns?: Partial<Record<SupportRequestKind, number>>;
 }
 
 export interface SupplyTransferEvent {
@@ -1569,6 +1581,11 @@ export class World {
   sideResources: Record<Side, number> = { blue: 500, red: 500 };
   indirectProjectiles: IndirectProjectile[] = [];
   smokeVolumes: SmokeVolume[] = [];
+  supportRequests: SupportRequest[] = [];
+  autoSupportEnabled = true;
+  supportBroker: SupportBroker = {
+    assignRequests: (world) => world.defaultAssignSupportRequests(),
+  };
   private listeners: ((e: SimEvent) => void)[] = [];
   private random: () => number;
   private casualtyMarks = new Map<string, number>();
@@ -1579,9 +1596,12 @@ export class World {
   private indirectSeq = 0;
   private smokeSeq = 0;
   private supplySeq = 0;
+  private supportSeq = 0;
   private unitBrains = new Map<string, UnitBrainFn>();
 
   constructor(readonly map: GameMap, seed = 1) { this.random = rng(seed); }
+
+  setSupportBroker(broker: SupportBroker) { this.supportBroker = broker; }
 
   /** Swap decision model for a specific unit id or "*" wildcard with zero engine changes. */
   setUnitBrain(unitId: string | "*", fn: UnitBrainFn | null) {
@@ -1702,6 +1722,13 @@ export class World {
     for (const other of this.units) {
       if (other.target === u.id) other.target = undefined;
       other.ownPerception.delete(u.id);
+    }
+    this.supportRequests = this.supportRequests.filter((r) => r.requesterId !== u.id);
+    for (const r of this.supportRequests) {
+      if (r.assignedResponderId === u.id) {
+        r.assignedResponderId = undefined;
+        if (r.status === "assigned") r.status = "pending";
+      }
     }
     this.casualtyMarks.delete(u.id);
     this.underFireReported.delete(u.id);
@@ -2339,6 +2366,8 @@ export class World {
     for (const u of live) this.tickFireMission(u);
     for (const u of live) this.fire(u);
     for (const u of live) this.bot(u);
+    this.runSupportBroker();
+    this.tickSupportResponders();
   }
 
   private tickAviationAndTimers() {
@@ -3391,6 +3420,272 @@ export class World {
     u.activeMoraleEvents = events;
   }
 
+  private unitAmmoStats(u: Unit): { cur: number; max: number } {
+    let cur = u.indirectAmmo;
+    let max = u.maxIndirectAmmo;
+    if (u.subRoster) {
+      for (const w of u.subRoster.weapons) { cur += w.ammoRemaining; max += w.maxAmmo; }
+    } else {
+      for (const w of u.weapons) { cur += w.ammoRemaining; max += w.maxAmmo; }
+    }
+    return { cur, max };
+  }
+
+  private unitWiaCount(u: Unit): number {
+    if (!u.subRoster) return 0;
+    return SPECIALIST_ROLES.reduce((s, r) => s + u.subRoster!.wia[r], 0);
+  }
+
+  private requesterSatisfied(req: SupportRequest, u: Unit): boolean {
+    if (req.kind !== "resupply_repairs") return false;
+    const { cur, max } = this.unitAmmoStats(u);
+    const ammoOk = max <= 0 || cur / max >= 0.9;
+    const wiaOk = this.unitWiaCount(u) === 0;
+    const hpCap = u.type === "helicopter" ? 50 : 95;
+    const hpOk = !!u.subRoster || u.strength >= hpCap;
+    return ammoOk && wiaOk && hpOk;
+  }
+
+  submitSupportRequest(
+    req: Omit<SupportRequest, "id" | "createdAt" | "status"> & Partial<Pick<SupportRequest, "id" | "createdAt" | "status">>,
+  ): SupportRequest {
+    const existing = this.supportRequests.find(
+      (r) => r.requesterId === req.requesterId && r.kind === req.kind && (r.status === "pending" || r.status === "assigned"),
+    );
+    if (existing) {
+      existing.targetPos = { ...req.targetPos };
+      existing.urgency = Math.max(existing.urgency, req.urgency);
+      existing.hasObserverSight = existing.hasObserverSight || req.hasObserverSight;
+      return existing;
+    }
+    const requester = this.get(req.requesterId);
+    if (requester) {
+      requester.supportCooldowns = requester.supportCooldowns ?? {};
+      requester.supportCooldowns[req.kind] = this.t + 20;
+    }
+    const created: SupportRequest = {
+      id: req.id || `SR_${++this.supportSeq}`,
+      requesterId: req.requesterId,
+      side: req.side,
+      kind: req.kind,
+      targetPos: { ...req.targetPos },
+      urgency: Math.min(100, Math.max(0, Math.round(req.urgency))),
+      hasObserverSight: req.hasObserverSight,
+      createdAt: req.createdAt ?? this.t,
+      ttl: req.ttl,
+      assignedResponderId: req.assignedResponderId,
+      status: req.status ?? "pending",
+    };
+    this.supportRequests.push(created);
+    return created;
+  }
+
+  private isResponderBusy(responder: Unit): boolean {
+    if (responder.assignedSupportId) return true;
+    return this.supportRequests.some(
+      (r) => r.assignedResponderId === responder.id && r.status === "assigned",
+    );
+  }
+
+  defaultAssignSupportRequests() {
+    if (!this.autoSupportEnabled) return;
+    const pending = this.supportRequests
+      .filter((r) => r.status === "pending")
+      .sort((a, b) => b.urgency - a.urgency || a.createdAt - b.createdAt);
+
+    for (const req of pending) {
+      let best: Unit | undefined;
+      let bestScore = Infinity;
+
+      for (const u of this.units) {
+        if (u.side !== req.side || u.state === "destroyed" || u.state === "broken" || u.state === "pinned") continue;
+        if (u.offMapReconstituteAt !== undefined || this.isResponderBusy(u)) continue;
+
+        if (req.kind === "artillery_smoke" || req.kind === "artillery_he") {
+          if (u.type !== "artillery" && u.type !== "mlrs") continue;
+          if (u.order.kind !== "hold" || u.fireMission || u.tacticalDest || u.indirectAmmo <= 0) continue;
+          const spec = getIndirectSpec(u);
+          if (!spec) continue;
+          if (req.kind === "artillery_smoke" && !spec.supportsSmoke) continue;
+          const d = dist(u.pos, req.targetPos);
+          if (d < spec.minRange || d > spec.maxRange) continue;
+          const score = d + (req.kind === "artillery_smoke" && u.type === "mlrs" ? 2000 : 0) - (u.isPositionCalibrated ? 400 : 0);
+          if (score < bestScore) { bestScore = score; best = u; }
+        } else if (req.kind === "resupply_repairs") {
+          if (u.type !== "supply_truck" || u.supplyCapacity <= 0 || u.order.kind !== "hold" || u.tacticalDest) continue;
+          const hasFob = this.onMapAlive(req.side).some((f) => f.type === "fob");
+          if (u.supplyCarried <= 0 && !hasFob) continue;
+          const score = dist(u.pos, req.targetPos) + (u.supplyCarried > 0 ? 0 : 1200);
+          if (score < bestScore) { bestScore = score; best = u; }
+        } else if (req.kind === "air_strike") {
+          if (u.type !== "aircraft") continue;
+          if (u.airState !== "at_base" && !(u.airState === "on_station" && u.order.kind === "hold")) continue;
+          const hasStrikeOrdnance = u.weapons.some((w) => w.targetDomain !== "air" && w.ammoRemaining > 0);
+          if (!hasStrikeOrdnance) continue;
+          const score = u.airState === "on_station" ? dist(u.pos, req.targetPos) : 3000;
+          if (score < bestScore) { bestScore = score; best = u; }
+        }
+      }
+
+      if (best) {
+        req.assignedResponderId = best.id;
+        req.status = "assigned";
+        best.assignedSupportId = req.id;
+      }
+    }
+  }
+
+  private runSupportBroker() {
+    for (const r of this.supportRequests) {
+      if (r.status === "completed" || r.status === "expired") continue;
+      const reqUnit = this.get(r.requesterId);
+      if (!reqUnit || reqUnit.state === "destroyed") {
+        r.status = "expired";
+        continue;
+      }
+      if (r.status === "pending" && this.t - r.createdAt > r.ttl) {
+        r.status = "expired";
+        continue;
+      }
+      if (r.kind === "resupply_repairs" && this.requesterSatisfied(r, reqUnit)) {
+        r.status = "completed";
+        if (r.assignedResponderId) {
+          const resp = this.get(r.assignedResponderId);
+          if (resp?.assignedSupportId === r.id) resp.assignedSupportId = undefined;
+        }
+        continue;
+      }
+      if (r.status === "assigned" && r.assignedResponderId) {
+        const resp = this.get(r.assignedResponderId);
+        const invalid =
+          !resp || resp.state === "destroyed" || resp.state === "broken" ||
+          ((resp.type === "artillery" || resp.type === "mlrs") && resp.indirectAmmo <= 0 && !resp.fireMission);
+        if (invalid) {
+          if (resp && resp.assignedSupportId === r.id) resp.assignedSupportId = undefined;
+          r.assignedResponderId = undefined;
+          r.status = "pending";
+        }
+      }
+    }
+    this.supportBroker.assignRequests(this);
+    this.supportRequests = this.supportRequests.filter(
+      (r) => r.status === "pending" || r.status === "assigned" || this.t - r.createdAt <= r.ttl + 20,
+    );
+  }
+
+  private moveSupportTruckSafely(sv: Unit, dest: Vec) {
+    const baseAng = Math.atan2(dest.y - sv.pos.y, dest.x - sv.pos.x);
+    const enemies = this.onMapAlive(sv.side === "blue" ? "red" : "blue").filter((e) => !e.embarkedIn);
+    const step = 12;
+    let bestDest = dest;
+    if (enemies.length > 0) {
+      const exposedAt = (p: Vec) =>
+        enemies.some((e) => dist(e.pos, p) <= this.effectiveSpotRange(e) && !this.sightlineBetween(e, { ...sv, pos: p }).blocked);
+      if (exposedAt({ x: sv.pos.x + Math.cos(baseAng) * step, y: sv.pos.y + Math.sin(baseAng) * step })) {
+        for (const off of [0.75, -0.75, 1.35, -1.35]) {
+          const cand = {
+            x: Math.min(this.map.width - 15, Math.max(15, sv.pos.x + Math.cos(baseAng + off) * 45)),
+            y: Math.min(this.map.depth - 15, Math.max(15, sv.pos.y + Math.sin(baseAng + off) * 45)),
+          };
+          if (this.canOccupy(sv, cand) && !exposedAt(cand)) { bestDest = cand; break; }
+        }
+      }
+    }
+    sv.state = "moving";
+    sv.settledTicks = 0;
+    this.move(sv, bestDest, true);
+  }
+
+  private tickSupportResponders() {
+    const fobR = STATS.fob.supplyRadius ?? 220;
+    const truckR = STATS.supply_truck.supplyRadius ?? 150;
+
+    for (const r of this.supportRequests) {
+      if (r.status !== "assigned" || !r.assignedResponderId) continue;
+      const resp = this.get(r.assignedResponderId);
+      if (!resp || resp.state === "destroyed" || resp.state === "broken") continue;
+
+      if (resp.type === "artillery" || resp.type === "mlrs") {
+        if (!resp.fireMission) {
+          if (resp.tacticalDest) continue;
+          const fmTag = `support:${r.id}`;
+          if (resp.order.intentTag === fmTag) {
+            r.status = "completed";
+            resp.assignedSupportId = undefined;
+            resp.order = { kind: "hold" };
+            // Counter-battery shoot-and-scoot vs preserving isPositionCalibrated
+            const threatExposure =
+              this.hasIncomingArtilleryWarning(resp) ||
+              this.t - resp.lastHitAt <= 12 ||
+              this.onMapAlive(resp.side === "blue" ? "red" : "blue").some(
+                (e) => e.ownPerception.get(resp.id) === "visual" && dist(e.pos, resp.pos) < 1600,
+              );
+            if (threatExposure) {
+              const ang = resp.heading + Math.PI * 0.75;
+              const disp = this.findValidLocalDest(resp, resp.anchorPos, { x: resp.pos.x + Math.cos(ang) * 110, y: resp.pos.y + Math.sin(ang) * 110 }, DEFAULT_LEASH_RADIUS);
+              resp.tacticalDest = disp;
+              resp.state = "moving";
+              this.move(resp, disp, true);
+            }
+          } else {
+            const spec = getIndirectSpec(resp);
+            const ammo: ArtilleryAmmoType =
+              r.kind === "artillery_smoke"
+                ? "Smoke"
+                : r.hasObserverSight && spec?.supportsAirburst
+                  ? "HE_Airburst"
+                  : "HE_Impact";
+            const res = this.command(resp, { kind: "fire_mission", dest: r.targetPos, ammoType: ammo, intentTag: fmTag });
+            if (res !== "ok") {
+              resp.assignedSupportId = undefined;
+              r.assignedResponderId = undefined;
+              r.status = "pending";
+            }
+          }
+        }
+      } else if (resp.type === "supply_truck") {
+        const reqUnit = this.get(r.requesterId);
+        if (!reqUnit || reqUnit.state === "destroyed" || this.requesterSatisfied(r, reqUnit)) {
+          r.status = "completed";
+          resp.assignedSupportId = undefined;
+          resp.tacticalDest = undefined;
+          if (resp.state === "moving") resp.state = "holding";
+          continue;
+        }
+        if (resp.supplyCarried <= 0) {
+          const fobs = this.onMapAlive(resp.side)
+            .filter((f) => f.type === "fob")
+            .sort((a, b) => dist(resp.pos, a.pos) - dist(resp.pos, b.pos));
+          const fob = fobs[0];
+          if (!fob) continue;
+          if (dist(resp.pos, fob.pos) > fobR * 0.65) {
+            this.moveSupportTruckSafely(resp, fob.pos);
+          } else {
+            resp.state = "holding";
+          }
+        } else if (dist(resp.pos, reqUnit.pos) > truckR * 0.7) {
+          this.moveSupportTruckSafely(resp, reqUnit.pos);
+        } else {
+          resp.state = "holding";
+        }
+      } else if (resp.type === "aircraft") {
+        if (resp.airState === "at_base") {
+          const res = this.callAirSortie(resp.side, r.targetPos, "strike_egress");
+          if (!res.ok) {
+            resp.assignedSupportId = undefined;
+            r.assignedResponderId = undefined;
+            r.status = "pending";
+          }
+        } else if (resp.airState === "on_station" && resp.order.kind === "hold") {
+          this.command(resp, { kind: "air_sortie", dest: r.targetPos, missionProfile: "strike_egress" });
+        } else if (resp.airState === "egress" || resp.airState === "turnaround") {
+          r.status = "completed";
+          resp.assignedSupportId = undefined;
+        }
+      }
+    }
+  }
+
   private canUnitPenetrate(attacker: Unit, target: Unit, d: number): boolean {
     const slots = attacker.subRoster
       ? attacker.subRoster.weapons.filter((w) => w.ammoRemaining > 0).map((w) => w.weapon)
@@ -3454,17 +3749,11 @@ export class World {
     const isInf = u.traits.includes("infantry");
     const baseSpeedKmH = FACTION_VARIANTS[u.side][u.type].baseSpeedKmH ?? STATS[u.type].baseSpeedKmH;
 
-    let ammoCur = u.indirectAmmo;
-    let ammoMax = u.maxIndirectAmmo;
-    if (u.subRoster) {
-      for (const w of u.subRoster.weapons) { ammoCur += w.ammoRemaining; ammoMax += w.maxAmmo; }
-    } else {
-      for (const w of u.weapons) { ammoCur += w.ammoRemaining; ammoMax += w.maxAmmo; }
-    }
-    let wiaCount = 0;
+    const { cur: ammoCur, max: ammoMax } = this.unitAmmoStats(u);
+    const wiaCount = this.unitWiaCount(u);
     let kiaCount = 0;
     if (u.subRoster) {
-      for (const r of SPECIALIST_ROLES) { wiaCount += u.subRoster.wia[r]; kiaCount += u.subRoster.kia[r]; }
+      for (const r of SPECIALIST_ROLES) kiaCount += u.subRoster.kia[r];
     }
 
     const nearbyCoverCandidates = baseSpeedKmH > 0 && !STATS[u.type].isAirUnit
@@ -3497,6 +3786,30 @@ export class World {
     }
     threatsAndTargets.sort((a, b) => dist(u.pos, a.pos) - dist(u.pos, b.pos));
 
+    const availableSupport: SupportRequestKind[] = [];
+    if (this.autoSupportEnabled && u.type !== "fob" && u.type !== "supply_truck" && u.type !== "aircraft") {
+      const canEmit = (kind: SupportRequestKind) =>
+        (u.supportCooldowns?.[kind] ?? -1e9) <= this.t &&
+        !this.supportRequests.some((r) => r.requesterId === u.id && r.kind === kind && (r.status === "pending" || r.status === "assigned"));
+      const sideUnits = this.units.filter((f) => f.side === u.side && f.state !== "destroyed" && f.state !== "broken");
+      if (canEmit("artillery_smoke") && sideUnits.some((f) => f.type === "artillery" && f.indirectAmmo > 0)) {
+        availableSupport.push("artillery_smoke");
+      }
+      if (canEmit("artillery_he") && sideUnits.some((f) => (f.type === "artillery" || f.type === "mlrs") && f.indirectAmmo > 0)) {
+        availableSupport.push("artillery_he");
+      }
+      if (canEmit("air_strike") && sideUnits.some((f) => f.type === "aircraft" && (f.airState === "at_base" || f.airState === "on_station"))) {
+        availableSupport.push("air_strike");
+      }
+      if (canEmit("resupply_repairs") && sideUnits.some((f) => f.type === "supply_truck")) {
+        availableSupport.push("resupply_repairs");
+      }
+    }
+    const primaryThreat = threatsAndTargets[0];
+    const hasObserverSight = primaryThreat
+      ? primaryThreat.ownPerception === "visual" || this.hasFriendlyObserverSight(u.side, primaryThreat.pos)
+      : false;
+
     return {
       self: {
         id: u.id,
@@ -3528,6 +3841,8 @@ export class World {
         nearbyCoverCandidates,
         nearbyBuildings,
         incomingArtilleryWarning: this.hasIncomingArtilleryWarning(u),
+        availableSupport,
+        hasObserverSight,
       },
       threatsAndTargets,
     };
@@ -3563,6 +3878,74 @@ export class World {
     }
 
     const unanswerable = ctx.threatsAndTargets.some((t) => t.canTheyPenetrateMe && !t.canPenetrateThem);
+    const threat = ctx.threatsAndTargets[0];
+    if (threat && (ctx.self.state === "pinned" || ctx.self.suppression >= 60 || (ctx.self.underFire && unanswerable))) {
+      const avail = ctx.environment.availableSupport;
+      if ((ctx.self.state === "pinned" || ctx.self.suppression >= 60) && avail.includes("artillery_smoke")) {
+        const screenPos = {
+          x: ctx.self.pos.x + (threat.pos.x - ctx.self.pos.x) * 0.45,
+          y: ctx.self.pos.y + (threat.pos.y - ctx.self.pos.y) * 0.45,
+        };
+        return {
+          kind: "request_support",
+          request: {
+            id: "",
+            requesterId: ctx.self.id,
+            side: ctx.self.side,
+            kind: "artillery_smoke",
+            targetPos: screenPos,
+            urgency: Math.min(100, Math.round(55 + ctx.self.suppression * 0.45)),
+            hasObserverSight: ctx.environment.hasObserverSight,
+            createdAt: 0,
+            ttl: 40,
+            status: "pending",
+          },
+        };
+      }
+      if (unanswerable && (avail.includes("artillery_he") || avail.includes("air_strike"))) {
+        const kind: SupportRequestKind = avail.includes("artillery_he") ? "artillery_he" : "air_strike";
+        return {
+          kind: "request_support",
+          request: {
+            id: "",
+            requesterId: ctx.self.id,
+            side: ctx.self.side,
+            kind,
+            targetPos: { ...threat.pos },
+            urgency: Math.min(100, Math.round(60 + (1 - ctx.self.hpRatio) * 40)),
+            hasObserverSight: ctx.environment.hasObserverSight,
+            createdAt: 0,
+            ttl: 45,
+            status: "pending",
+          },
+        };
+      }
+    }
+
+    if (
+      !ctx.self.underFire &&
+      ctx.threatsAndTargets.length === 0 &&
+      ctx.environment.availableSupport.includes("resupply_repairs") &&
+      (ctx.self.ammoRatio < 0.25 || ctx.self.wiaCount > 0 || (ctx.self.hpRatio < 0.75 && !ctx.self.isInfantry))
+    ) {
+      const urgency = Math.min(100, Math.round((1 - ctx.self.ammoRatio) * 50 + ctx.self.wiaCount * 15 + (1 - ctx.self.hpRatio) * 40));
+      return {
+        kind: "request_support",
+        request: {
+          id: "",
+          requesterId: ctx.self.id,
+          side: ctx.self.side,
+          kind: "resupply_repairs",
+          targetPos: { ...ctx.self.pos },
+          urgency,
+          hasObserverSight: false,
+          createdAt: 0,
+          ttl: 90,
+          status: "pending",
+        },
+      };
+    }
+
     if (ctx.self.underFire && ctx.self.baseSpeedKmH > 0 && (unanswerable || ctx.self.suppression >= 60) && (ctx.self.hasSmoke || ctx.self.suppression >= 60)) {
       const threat = ctx.threatsAndTargets[0];
       const awayAng = threat
@@ -3718,7 +4101,14 @@ export class World {
       }
       return;
     }
-    // "request_support": broker routing will be connected in Phase 4C
+    if (action.kind === "request_support") {
+      this.submitSupportRequest({
+        ...action.request,
+        requesterId: u.id,
+        side: u.side,
+      });
+      u.settledTicks += 1;
+    }
   }
 
   private bot(u: Unit) {

@@ -1024,6 +1024,79 @@ function verifyPhase4B() {
 verifyPhase4B();
 console.log("Phase 4B zero-adaptation-cost UnitBrainFn, leashRadius cover snap, smoke retreat & artillery scoot checks passed.");
 
+function verifyPhase4C() {
+  // 1. Pinned frontline unit emits artillery_smoke -> SupportBroker assigns friendly artillery -> smoke blocks enemy LoS
+  const smkMap = new GameMap(3500, 2000, 1, { empty: true });
+  const sw = new World(smkMap, 81);
+  const spg = sw.add({ id: "BlueSPG", side: "blue", type: "artillery", pos: { x: 400, y: 1000 } });
+  const frontInf = sw.add({ id: "PinnedInf", side: "blue", type: "infantry", pos: { x: 1600, y: 1000 } });
+  const enemyTank = sw.add({ id: "RedTank", side: "red", type: "tank", pos: { x: 2200, y: 1000 }, roe: "hold_fire" });
+
+  // Force pinned state with heavy suppression while seeing enemyTank
+  frontInf.suppression = 75;
+  frontInf.lastHitAt = sw.t;
+  frontInf.defensiveSmokeCooldownUntil = sw.t + 100; // isolate indirect artillery_smoke screen check
+  sw.step();
+
+  const smokeTicket = sw.supportRequests.find((r) => r.requesterId === "PinnedInf" && r.kind === "artillery_smoke");
+  assert.ok(smokeTicket, "Pinned frontline unit must emit artillery_smoke SupportRequest");
+  assert.equal(smokeTicket!.assignedResponderId, "BlueSPG", "SupportBroker must assign idle artillery to artillery_smoke ticket");
+  assert.equal(spg.fireMission?.effectiveAmmo, "Smoke", "Assigned artillery must execute Smoke fire_mission");
+
+  for (let i = 0; i < 15; i++) sw.step();
+  const smokeCloud = sw.smokeVolumes.find((v) => v.radius >= 70);
+  assert.ok(smokeCloud, "Artillery smoke fire mission must spawn 75m SmokeVolume");
+  const losCheck = smkMap.sightline(enemyTank.pos, 2.8, frontInf.pos, 1.5, { dynamicVolumes: sw.smokeVolumes });
+  assert.ok(losCheck.transmittance < 0.05, "Delivered artillery smoke screen must block enemy LoS");
+
+  // 2. Out-of-combat unit with low ammo (<25%) & WIA emits resupply_repairs -> empty SupplyVehicle visits FOB then heals/rearms requester
+  const logMap = new GameMap(2500, 1500, 1, { empty: true });
+  const lw = new World(logMap, 82);
+  const fob = lw.add({ id: "LogFOB", side: "blue", type: "fob", pos: { x: 300, y: 750 } });
+  const truck = lw.add({ id: "EmptyHEMTT", side: "blue", type: "supply_truck", pos: { x: 750, y: 750 } });
+  const needy = lw.add({ id: "NeedyInf", side: "blue", type: "infantry", pos: { x: 1150, y: 750 } });
+  assert.equal(truck.supplyCarried, 0, "SupplyVehicle must enter empty");
+  for (const w of needy.subRoster!.weapons) w.ammoRemaining = 0;
+  needy.subRoster!.personnel.rifleman = 4;
+  needy.subRoster!.wia.rifleman = 2;
+  needy.headcount = 6;
+  needy.strength = 75;
+
+  lw.step();
+  const supTicket = lw.supportRequests.find((r) => r.requesterId === "NeedyInf" && r.kind === "resupply_repairs");
+  assert.ok(supTicket, "Depleted/WIA unit out of combat must emit resupply_repairs SupportRequest");
+  assert.equal(supTicket!.assignedResponderId, "EmptyHEMTT", "SupportBroker must dispatch SupplyVehicle");
+
+  let loadedAtFob = false;
+  for (let i = 0; i < 140; i++) {
+    lw.step();
+    if (truck.supplyCarried > 0) loadedAtFob = true;
+    if (supTicket!.status === "completed") break;
+  }
+  assert.equal(loadedAtFob, true, "Empty SupplyVehicle must shuttle to FOB first to load supply");
+  assert.equal(supTicket!.status, "completed", "resupply_repairs ticket must complete once requester is replenished");
+  assert.equal(needy.subRoster!.wia.rifleman, 0, "SupplyVehicle shuttle must heal requester WIA");
+  assert.ok(
+    needy.subRoster!.weapons.every((w) => w.ammoRemaining >= Math.floor(w.maxAmmo * 0.9)),
+    "SupplyVehicle shuttle must rearm requester weapons",
+  );
+  assert.ok(dist(fob.pos, needy.pos) > 500);
+
+  // 3. autoSupportEnabled toggle pauses automatic dispatch when OFF
+  lw.autoSupportEnabled = false;
+  const needy2 = lw.add({ id: "Needy2", side: "blue", type: "tank", pos: { x: 1150, y: 900 } });
+  for (const w of needy2.weapons) w.ammoRemaining = 0;
+  lw.step();
+  assert.equal(
+    lw.supportRequests.some((r) => r.requesterId === "Needy2"),
+    false,
+    "Disabling autoSupportEnabled must suppress automatic SupportRequest emission/dispatch",
+  );
+}
+
+verifyPhase4C();
+console.log("Phase 4C Request-Broker-Responder SupportBroker (artillery smoke & FOB-shuttle resupply) checks passed.");
+
 const objective = map.resolve("Geisa")!;
 for (const u of world.alive("blue")) {
   if (u.type === "fob" || u.type === "supply_truck" || u.type === "artillery" || u.type === "mlrs") continue;
