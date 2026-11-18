@@ -24,6 +24,23 @@ export interface UnitGarrison {
   buildingId: string;
   floorLevel: number;
 }
+export const DEFAULT_LEASH_RADIUS = 140;
+
+export type SupportRequestKind =
+  | "artillery_he" | "artillery_smoke" | "air_strike"
+  | "resupply_repairs" | "transport_pickup" | "armor_support";
+
+export interface SupportRequest {
+  id: string;
+  requesterId: string;
+  kind: SupportRequestKind;
+  targetPos: Vec;
+  urgency: number;
+  hasObserverSight: boolean;
+  createdAt: number;
+  ttl: number;
+}
+
 export interface Order {
   kind: OrderKind;
   dest?: Vec;
@@ -31,7 +48,64 @@ export interface Order {
   garrison?: UnitGarrison;
   ammoType?: ArtilleryAmmoType;
   missionProfile?: AirMissionProfile;
+  leashRadius?: number;
+  intentTag?: string;
 }
+
+export interface UnitTacticalContext {
+  self: {
+    id: string;
+    side: Side;
+    type: UnitType;
+    pos: Vec;
+    anchorPos: Vec;
+    heading: number;
+    state: BotState;
+    roe: Roe;
+    moraleTier: MoraleTier;
+    suppression: number;
+    hpRatio: number;
+    wiaCount: number;
+    kiaCount: number;
+    ammoRatio: number;
+    baseSpeedKmH: number;
+    hasSmoke: boolean;
+    underFire: boolean;
+    isArmored: boolean;
+    isInfantry: boolean;
+    inBuilding?: { id: string; floor: number };
+    tacticalDest?: Vec;
+    order: Order;
+  };
+  environment: {
+    currentTerrain: TerrainId;
+    inCover: boolean;
+    nearbyCoverCandidates: Vec[];
+    nearbyBuildings: { id: string; pos: Vec; floor: number }[];
+    incomingArtilleryWarning: boolean;
+  };
+  threatsAndTargets: {
+    id: string;
+    pos: Vec;
+    detection: DetectionLevel;
+    ownPerception: OwnPerceptionLevel;
+    canPenetrateThem: boolean;
+    canTheyPenetrateMe: boolean;
+  }[];
+}
+
+export type TacticalAction =
+  | { kind: "hold_and_engage"; targetId?: string }
+  | { kind: "move_to"; dest: Vec; useRoads: boolean }
+  | { kind: "seek_local_cover"; coverPos: Vec }
+  | { kind: "enter_building"; buildingId: string; floor: number }
+  | { kind: "change_floor"; targetFloor: number }
+  | { kind: "pop_smoke_and_retreat"; retreatPos: Vec }
+  | { kind: "shoot_and_scoot"; displacePos: Vec }
+  | { kind: "request_support"; request: SupportRequest }
+  | { kind: "withdraw_off_map" };
+
+export type UnitBrainFn = (ctx: UnitTacticalContext) => TacticalAction;
 export interface FireMissionState {
   targetPos: Vec;
   requestedAmmo: ArtilleryAmmoType;
@@ -1228,6 +1302,10 @@ export interface Unit {
   isLanded: boolean;
   isForcedLanding: boolean;
   sortieTarget?: Vec;
+  anchorPos: Vec;
+  tacticalDest?: Vec;
+  lastTacticalAction?: TacticalAction;
+  defensiveSmokeCooldownUntil?: number;
 }
 
 export interface SupplyTransferEvent {
@@ -1331,6 +1409,10 @@ export interface UnitTelemetry {
   turnaroundTimers?: TurnaroundTimers;
   isLanded: boolean;
   isForcedLanding: boolean;
+  lastTacticalAction?: TacticalAction;
+  leashRadius: number;
+  intentTag?: string;
+  anchorPos: Vec;
 }
 
 export interface SupplyTransferEvent {
@@ -1497,8 +1579,15 @@ export class World {
   private indirectSeq = 0;
   private smokeSeq = 0;
   private supplySeq = 0;
+  private unitBrains = new Map<string, UnitBrainFn>();
 
   constructor(readonly map: GameMap, seed = 1) { this.random = rng(seed); }
+
+  /** Swap decision model for a specific unit id or "*" wildcard with zero engine changes. */
+  setUnitBrain(unitId: string | "*", fn: UnitBrainFn | null) {
+    if (fn) this.unitBrains.set(unitId, fn);
+    else this.unitBrains.delete(unitId);
+  }
 
   private pushShotEvent(ev: Omit<CombatShotEvent, "id">) {
     this.shotEvents.push({ id: ++this.shotSeq, ...ev });
@@ -1528,7 +1617,7 @@ export class World {
       | "settledTicks" | "stuckTicks" | "embarkedIds" | "activeMoraleEvents"
       | "ownPerception" | "armor" | "weapons" | "mutexCooldowns" | "hasObserver" | "isPositionCalibrated"
       | "indirectAmmo" | "maxIndirectAmmo" | "supplyCarried" | "supplyCapacity" | "veterancy"
-      | "fuel" | "maxFuel" | "afterburner" | "isLanded" | "isForcedLanding"
+      | "fuel" | "maxFuel" | "afterburner" | "isLanded" | "isForcedLanding" | "anchorPos"
     > & Partial<Unit>,
   ) {
     const st = STATS[u.type];
@@ -1585,6 +1674,7 @@ export class World {
       afterburner: false,
       isLanded: false,
       isForcedLanding: false,
+      anchorPos: { ...u.pos },
       ...u,
     };
     this.units.push(unit);
@@ -1868,8 +1958,10 @@ export class World {
       order = { ...order, dest: exitDest, destName: order.destName ?? "map edge" };
     }
     u.fireMission = undefined;
+    u.tacticalDest = undefined;
     if (order.dest && u.garrison) this.vacateBuilding(u);
     u.order = order;
+    u.anchorPos = order.dest ? { ...order.dest } : { ...u.pos };
     if (roe) u.roe = roe;
     else if (order.kind === "attack") u.roe = "fire_at_will";
     else if (order.kind === "withdraw" || order.kind === "withdraw_off_map") u.roe = "return_fire";
@@ -2224,6 +2316,10 @@ export class World {
       turnaroundTimers: u.turnaroundTimers ? { ...u.turnaroundTimers } : undefined,
       isLanded: u.isLanded,
       isForcedLanding: u.isForcedLanding,
+      lastTacticalAction: u.lastTacticalAction,
+      leashRadius: u.order.leashRadius ?? DEFAULT_LEASH_RADIUS,
+      intentTag: u.order.intentTag,
+      anchorPos: { ...u.anchorPos },
     };
   }
 
@@ -3295,6 +3391,336 @@ export class World {
     u.activeMoraleEvents = events;
   }
 
+  private canUnitPenetrate(attacker: Unit, target: Unit, d: number): boolean {
+    const slots = attacker.subRoster
+      ? attacker.subRoster.weapons.filter((w) => w.ammoRemaining > 0).map((w) => w.weapon)
+      : attacker.weapons.filter((w) => w.ammoRemaining > 0);
+    for (const s of slots) {
+      if (s.range < d * 0.85) continue;
+      if (s.targetDomain === "air" && !this.isAirborneTarget(target)) continue;
+      if (s.targetDomain === "ground" && this.isAirborneTarget(target)) continue;
+      if (s.ammo === "HEAT" && s.pen >= target.armor.front.ce) return true;
+      if (s.ammo === "AP" && computeApPenetration(s.pen, d, s.range) >= target.armor.front.ke) return true;
+      if (s.ammo === "HE" && s.pen >= Math.min(target.armor.front.ke, target.armor.top.ke)) return true;
+    }
+    return false;
+  }
+
+  private hasIncomingArtilleryWarning(u: Unit): boolean {
+    for (const p of this.indirectProjectiles) {
+      if (p.side !== u.side && p.ammo !== "Smoke" && dist(p.to, u.pos) <= 180) return true;
+    }
+    for (const e of this.onMapAlive()) {
+      if (e.side !== u.side && e.fireMission && e.fireMission.effectiveAmmo !== "Smoke" && dist(e.fireMission.targetPos, u.pos) <= 180) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private clampToLeash(anchor: Vec, target: Vec, leash: number): Vec {
+    const d = dist(anchor, target);
+    const clamped =
+      d <= leash || d < 1e-6
+        ? { ...target }
+        : { x: anchor.x + ((target.x - anchor.x) / d) * leash, y: anchor.y + ((target.y - anchor.y) / d) * leash };
+    return {
+      x: Math.min(this.map.width - 15, Math.max(15, clamped.x)),
+      y: Math.min(this.map.depth - 15, Math.max(15, clamped.y)),
+    };
+  }
+
+  private findValidLocalDest(u: Unit, anchor: Vec, preferred: Vec, leash: number): Vec {
+    const first = this.clampToLeash(anchor, preferred, leash);
+    if (this.canOccupy(u, first)) return first;
+    const baseAng = Math.atan2(first.y - u.pos.y, first.x - u.pos.x);
+    const stepDist = Math.min(leash * 0.75, Math.max(50, dist(u.pos, first)));
+    for (const offset of [0.6, -0.6, 1.2, -1.2, 1.8, -1.8, Math.PI]) {
+      const cand = this.clampToLeash(
+        anchor,
+        { x: u.pos.x + Math.cos(baseAng + offset) * stepDist, y: u.pos.y + Math.sin(baseAng + offset) * stepDist },
+        leash,
+      );
+      if (this.canOccupy(u, cand)) return cand;
+    }
+    return { ...u.pos };
+  }
+
+  buildUnitTacticalContext(u: Unit): UnitTacticalContext {
+    const leash = u.order.leashRadius ?? DEFAULT_LEASH_RADIUS;
+    const terrainId = this.map.terrainIdAt(u.pos);
+    const mods = this.baseCoverModifiers(u);
+    const inCover = !!u.garrison || (mods.damageMult ?? 1) < 1 || (mods.signatureMult ?? 1) < 0.85;
+    const isInf = u.traits.includes("infantry");
+    const baseSpeedKmH = FACTION_VARIANTS[u.side][u.type].baseSpeedKmH ?? STATS[u.type].baseSpeedKmH;
+
+    let ammoCur = u.indirectAmmo;
+    let ammoMax = u.maxIndirectAmmo;
+    if (u.subRoster) {
+      for (const w of u.subRoster.weapons) { ammoCur += w.ammoRemaining; ammoMax += w.maxAmmo; }
+    } else {
+      for (const w of u.weapons) { ammoCur += w.ammoRemaining; ammoMax += w.maxAmmo; }
+    }
+    let wiaCount = 0;
+    let kiaCount = 0;
+    if (u.subRoster) {
+      for (const r of SPECIALIST_ROLES) { wiaCount += u.subRoster.wia[r]; kiaCount += u.subRoster.kia[r]; }
+    }
+
+    const nearbyCoverCandidates = baseSpeedKmH > 0 && !STATS[u.type].isAirUnit
+      ? this.map.findNearbyCoverCandidates(u.anchorPos, leash, u.traits, u.mobility)
+      : [];
+    const nearbyBuildings: { id: string; pos: Vec; floor: number }[] = [];
+    if (isInf) {
+      for (const b of this.map.buildings) {
+        if (dist(b.center, u.anchorPos) > leash) continue;
+        const intact = b.floors.find((f) => f.state !== "gutted" && f.occupants.length === 0 && f.capacity >= u.headcount);
+        if (intact) nearbyBuildings.push({ id: b.id, pos: { ...b.center }, floor: intact.level });
+      }
+      nearbyBuildings.sort((a, b) => dist(u.pos, a.pos) - dist(u.pos, b.pos));
+    }
+
+    const threatsAndTargets: UnitTacticalContext["threatsAndTargets"] = [];
+    for (const e of this.onMapAlive()) {
+      if (e.side === u.side || e.embarkedIn) continue;
+      const own = u.ownPerception.get(e.id) ?? "none";
+      const shared = this.contacts[u.side].get(e.id);
+      if (own === "none" && (!shared || this.t - shared.seenAt > FRIENDLY_CONTACT_SHARE_WINDOW)) continue;
+      const detection: DetectionLevel = own === "visual" || shared?.level === "visual" ? "visual" : "contact";
+      const d = dist(u.pos, e.pos);
+      const canPenetrateThem = detection === "visual" ? this.canUnitPenetrate(u, e, d) : true;
+      const canTheyPenetrateMe =
+        detection === "visual"
+          ? this.canUnitPenetrate(e, u, d)
+          : shared?.weaponClass === "heavy_weapon" && u.armor.front.ke < 12;
+      threatsAndTargets.push({ id: e.id, pos: { ...e.pos }, detection, ownPerception: own, canPenetrateThem, canTheyPenetrateMe });
+    }
+    threatsAndTargets.sort((a, b) => dist(u.pos, a.pos) - dist(u.pos, b.pos));
+
+    return {
+      self: {
+        id: u.id,
+        side: u.side,
+        type: u.type,
+        pos: { ...u.pos },
+        anchorPos: { ...u.anchorPos },
+        heading: u.heading,
+        state: u.state,
+        roe: u.roe,
+        moraleTier: getMoraleTier(u.morale),
+        suppression: u.suppression,
+        hpRatio: u.strength / 100,
+        wiaCount,
+        kiaCount,
+        ammoRatio: ammoMax > 0 ? ammoCur / ammoMax : 1,
+        baseSpeedKmH,
+        hasSmoke: (u.defensiveSmokeCooldownUntil ?? -1e9) <= this.t && u.type !== "fob" && u.type !== "supply_truck",
+        underFire: this.t - u.lastHitAt <= 6,
+        isArmored: u.traits.includes("armored"),
+        isInfantry: isInf,
+        inBuilding: u.garrison ? { id: u.garrison.buildingId, floor: u.garrison.floorLevel } : undefined,
+        tacticalDest: u.tacticalDest ? { ...u.tacticalDest } : undefined,
+        order: { ...u.order },
+      },
+      environment: {
+        currentTerrain: terrainId,
+        inCover,
+        nearbyCoverCandidates,
+        nearbyBuildings,
+        incomingArtilleryWarning: this.hasIncomingArtilleryWarning(u),
+      },
+      threatsAndTargets,
+    };
+  }
+
+  private defaultUnitBrain(ctx: UnitTacticalContext): TacticalAction {
+    const leash = ctx.self.order.leashRadius ?? DEFAULT_LEASH_RADIUS;
+    if (ctx.self.order.kind === "withdraw_off_map") return { kind: "withdraw_off_map" };
+    if (ctx.self.order.kind === "withdraw" && ctx.self.order.dest) {
+      return { kind: "move_to", dest: ctx.self.order.dest, useRoads: false };
+    }
+    if (ctx.self.roe === "hold_fire") {
+      if (ctx.self.state === "moving" && ctx.self.order.dest && ctx.self.order.kind !== "fire_mission") {
+        return { kind: "move_to", dest: ctx.self.order.dest, useRoads: false };
+      }
+      return { kind: "hold_and_engage", targetId: ctx.threatsAndTargets[0]?.id };
+    }
+
+    if (ctx.environment.incomingArtilleryWarning && ctx.self.baseSpeedKmH > 0) {
+      if (ctx.self.tacticalDest && dist(ctx.self.pos, ctx.self.tacticalDest) > 10) {
+        return { kind: "shoot_and_scoot", displacePos: ctx.self.tacticalDest };
+      }
+      const coverFar = ctx.environment.nearbyCoverCandidates.find(
+        (c) => dist(c, ctx.self.anchorPos) <= leash && dist(c, ctx.self.pos) >= 60,
+      );
+      const perpAngle = ctx.self.heading + Math.PI / 2;
+      const stepDist = Math.min(100, leash * 0.75);
+      const fallback = {
+        x: ctx.self.pos.x + Math.cos(perpAngle) * stepDist,
+        y: ctx.self.pos.y + Math.sin(perpAngle) * stepDist,
+      };
+      return { kind: "shoot_and_scoot", displacePos: coverFar ?? fallback };
+    }
+
+    const unanswerable = ctx.threatsAndTargets.some((t) => t.canTheyPenetrateMe && !t.canPenetrateThem);
+    if (ctx.self.underFire && ctx.self.baseSpeedKmH > 0 && (unanswerable || ctx.self.suppression >= 60) && (ctx.self.hasSmoke || ctx.self.suppression >= 60)) {
+      const threat = ctx.threatsAndTargets[0];
+      const awayAng = threat
+        ? Math.atan2(ctx.self.pos.y - threat.pos.y, ctx.self.pos.x - threat.pos.x)
+        : ctx.self.heading + Math.PI;
+      const retreatDist = Math.min(90, leash * 0.7);
+      const retreatPos = {
+        x: ctx.self.pos.x + Math.cos(awayAng) * retreatDist,
+        y: ctx.self.pos.y + Math.sin(awayAng) * retreatDist,
+      };
+      return { kind: "pop_smoke_and_retreat", retreatPos };
+    }
+
+    if (ctx.self.tacticalDest && dist(ctx.self.pos, ctx.self.tacticalDest) > 4) {
+      return { kind: "seek_local_cover", coverPos: ctx.self.tacticalDest };
+    }
+
+    const canSnapCover =
+      ctx.self.state === "holding" &&
+      !ctx.environment.inCover &&
+      ctx.environment.currentTerrain === "open" &&
+      !ctx.self.inBuilding &&
+      ctx.self.order.kind !== "fire_mission" &&
+      ctx.self.type !== "artillery" &&
+      ctx.self.type !== "mlrs" &&
+      ctx.self.type !== "fob" &&
+      ctx.self.type !== "supply_truck" &&
+      ctx.self.type !== "helicopter";
+    if (canSnapCover) {
+      if (ctx.self.isInfantry && ctx.environment.nearbyBuildings.length > 0) {
+        const b = ctx.environment.nearbyBuildings[0];
+        if (dist(b.pos, ctx.self.anchorPos) <= leash) {
+          return { kind: "enter_building", buildingId: b.id, floor: b.floor };
+        }
+      }
+      const c = ctx.environment.nearbyCoverCandidates.find((p) => dist(p, ctx.self.anchorPos) <= leash);
+      if (c) return { kind: "seek_local_cover", coverPos: c };
+    }
+
+    if (ctx.self.state === "moving" && ctx.self.order.dest && ctx.self.order.kind !== "fire_mission") {
+      return { kind: "move_to", dest: ctx.self.order.dest, useRoads: false };
+    }
+    return { kind: "hold_and_engage", targetId: ctx.threatsAndTargets[0]?.id };
+  }
+
+  evaluateTransition(u: Unit): TacticalAction {
+    const ctx = this.buildUnitTacticalContext(u);
+    const fn = this.unitBrains.get(u.id) ?? this.unitBrains.get("*");
+    return fn ? fn(ctx) : this.defaultUnitBrain(ctx);
+  }
+
+  executeTacticalAction(u: Unit, action: TacticalAction) {
+    const leash = u.order.leashRadius ?? DEFAULT_LEASH_RADIUS;
+    if (action.kind === "hold_and_engage") {
+      u.tacticalDest = undefined;
+      if (action.targetId) {
+        const tgt = this.get(action.targetId);
+        if (tgt && tgt.side !== u.side && tgt.state !== "destroyed") u.target = tgt.id;
+      }
+      if (u.state === "moving") u.state = "holding";
+      u.settledTicks += 1;
+      return;
+    }
+    if (action.kind === "move_to") {
+      u.tacticalDest = undefined;
+      if (u.state === "pinned") { u.settledTicks += 1; return; }
+      u.state = "moving";
+      u.settledTicks = 0;
+      this.move(u, action.dest, false);
+      return;
+    }
+    if (action.kind === "seek_local_cover") {
+      if (u.state === "pinned") { u.settledTicks += 1; return; }
+      const dest = this.findValidLocalDest(u, u.anchorPos, action.coverPos, leash);
+      u.tacticalDest = dest;
+      u.state = "moving";
+      u.settledTicks = 0;
+      this.move(u, dest, true);
+      return;
+    }
+    if (action.kind === "enter_building") {
+      if (u.state === "pinned") { u.settledTicks += 1; return; }
+      const bld = this.map.buildings.find((b) => b.id === action.buildingId);
+      if (!bld || dist(bld.center, u.anchorPos) > leash) return;
+      if (dist(u.pos, bld.center) <= 25) {
+        this.garrisonFloor(u, action.buildingId, action.floor);
+        u.tacticalDest = undefined;
+      } else {
+        u.order = { ...u.order, garrison: { buildingId: action.buildingId, floorLevel: action.floor } };
+        u.tacticalDest = { ...bld.center };
+        u.state = "moving";
+        u.settledTicks = 0;
+        this.move(u, bld.center, true);
+      }
+      return;
+    }
+    if (action.kind === "change_floor") {
+      if (u.garrison) this.garrisonFloor(u, u.garrison.buildingId, action.targetFloor);
+      return;
+    }
+    if (action.kind === "pop_smoke_and_retreat") {
+      if ((u.defensiveSmokeCooldownUntil ?? -1e9) <= this.t && u.type !== "fob" && u.type !== "supply_truck") {
+        u.defensiveSmokeCooldownUntil = this.t + 25;
+        const smokeCenter = {
+          x: Math.min(this.map.width - 10, Math.max(10, u.pos.x + Math.cos(u.heading) * 18)),
+          y: Math.min(this.map.depth - 10, Math.max(10, u.pos.y + Math.sin(u.heading) * 18)),
+        };
+        this.smokeVolumes.push({
+          id: ++this.smokeSeq,
+          center: smokeCenter,
+          radius: 45,
+          height: 10,
+          transmittancePer100m: 0.02,
+          expiresAt: this.t + 18,
+        });
+        const z = this.map.elevationAt(smokeCenter) + 1.5;
+        this.pushShotEvent({
+          t: this.t,
+          shooterId: u.id,
+          from: { ...u.pos },
+          fromZ: this.map.elevationAt(u.pos) + 1.5,
+          to: smokeCenter,
+          toZ: z,
+          ammo: "HE",
+          artilleryAmmo: "Smoke",
+          smokeRadius: 45,
+          weaponClass: "small_arms",
+          hit: true,
+          penetrated: false,
+          damageDealt: 0,
+        });
+      }
+      const retreat = this.findValidLocalDest(u, u.anchorPos, action.retreatPos, leash);
+      u.tacticalDest = retreat;
+      if (dist(u.pos, retreat) > 1) u.state = "moving";
+      u.settledTicks = 0;
+      this.move(u, retreat, true);
+      return;
+    }
+    if (action.kind === "shoot_and_scoot") {
+      const disp = this.findValidLocalDest(u, u.anchorPos, action.displacePos, leash);
+      u.tacticalDest = disp;
+      if (dist(u.pos, disp) > 1) u.state = "moving";
+      u.settledTicks = 0;
+      this.move(u, disp, true);
+      return;
+    }
+    if (action.kind === "withdraw_off_map") {
+      if (u.order.kind !== "withdraw_off_map") {
+        this.command(u, { kind: "withdraw_off_map" });
+      } else {
+        this.move(u, u.order.dest ?? this.nearestMapEdge(u.pos), false);
+      }
+      return;
+    }
+    // "request_support": broker routing will be connected in Phase 4C
+  }
+
   private bot(u: Unit) {
     if (u.state === "destroyed") return;
     if (u.embarkedIn) {
@@ -3312,6 +3738,7 @@ export class World {
     if (!isAirExempt && u.state !== "broken" && !u.embarkedIn && u.order.kind !== "withdraw_off_map" && (u.strength < 30 || u.morale < 20)) {
       if (u.garrison) this.vacateBuilding(u);
       u.fireMission = undefined;
+      u.tacticalDest = undefined;
       u.state = "broken";
       u.roe = "return_fire";
       u.order = { kind: "withdraw", dest: u.rally };
@@ -3336,15 +3763,23 @@ export class World {
             dist(u.pos, e.pos) <= STATS[u.type].range * 0.75 &&
             (u.ownPerception.get(e.id) ?? "none") !== "none",
         );
+      if (standoff && u.state === "moving") u.anchorPos = { ...u.pos };
       u.state = standoff ? "holding" : "moving";
     }
 
-    if (!u.embarkedIn && !(u.type === "helicopter" && u.isLanded) && (u.state === "moving" || u.state === "broken") && u.order.dest && u.order.kind !== "fire_mission") {
-      u.settledTicks = 0;
-      this.move(u, u.order.dest);
-    } else {
+    if (u.embarkedIn || (u.type === "helicopter" && u.isLanded)) {
       u.settledTicks += 1;
+      return;
     }
+    if (u.state === "broken") {
+      if (u.order.dest) { u.settledTicks = 0; this.move(u, u.order.dest, false); }
+      else u.settledTicks += 1;
+      return;
+    }
+
+    const action = this.evaluateTransition(u);
+    u.lastTacticalAction = action;
+    this.executeTacticalAction(u, action);
   }
 
   private canOccupy(u: Unit, p: Vec): boolean {
@@ -3378,7 +3813,7 @@ export class World {
     this.emit("arrived", u, `${u.id} withdrew off-map for reconstitution (-${cost} req)`);
   }
 
-  private move(u: Unit, dest: Vec) {
+  private move(u: Unit, dest: Vec, isTacticalManeuver = false) {
     if (u.garrison) this.vacateBuilding(u);
     u.isPositionCalibrated = false;
     u.fireMission = undefined;
@@ -3401,10 +3836,12 @@ export class World {
     const pendingGarrison = u.order.garrison;
     if (pendingGarrison && d <= Math.max(step, 15)) {
       const res = this.garrisonFloor(u, pendingGarrison.buildingId, pendingGarrison.floorLevel);
+      u.tacticalDest = undefined;
       if (res === "ok") {
         this.emit("arrived", u, `garrisoned ${pendingGarrison.buildingId} F${pendingGarrison.floorLevel}`);
       } else {
-        u.order = { kind: "hold" };
+        if (!isTacticalManeuver) u.order = { kind: "hold", leashRadius: u.order.leashRadius, intentTag: u.order.intentTag };
+        else u.order = { ...u.order, garrison: undefined };
         if (u.state === "moving") u.state = "holding";
       }
       u.stuckTicks = 0;
@@ -3417,19 +3854,25 @@ export class World {
           this.exitOffMap(u);
           return;
         }
-        u.order = { kind: "hold" };
+        u.tacticalDest = undefined;
+        if (!isTacticalManeuver) u.order = { kind: "hold", leashRadius: u.order.leashRadius, intentTag: u.order.intentTag };
         if (u.state === "moving") u.state = "holding";
         return;
       }
       u.heading = Math.atan2(dest.y - u.pos.y, dest.x - u.pos.x);
       u.pos = { ...dest };
       u.stuckTicks = 0;
+      u.tacticalDest = undefined;
       if (u.order.kind === "withdraw_off_map") {
         this.exitOffMap(u);
         return;
       }
+      if (isTacticalManeuver) {
+        if (u.state === "moving") u.state = "holding";
+        return;
+      }
       const was = u.order;
-      u.order = { kind: "hold" };
+      u.order = { kind: "hold", leashRadius: u.order.leashRadius, intentTag: u.order.intentTag };
       if (u.state === "moving") {
         u.state = "holding";
         this.emit("arrived", u, `arrived at ${was.destName ?? this.map.describe(dest)}, holding`);

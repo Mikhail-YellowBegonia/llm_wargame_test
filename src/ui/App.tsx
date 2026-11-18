@@ -1044,6 +1044,10 @@ export const App: React.FC = () => {
             {/* Live Selected-Unit Telemetry */}
             <div style={{ background: "rgba(235,229,215,0.6)", padding: 6, borderRadius: 4, fontSize: 10.5, fontFamily: "ui-monospace, monospace" }}>
               <div><strong>Telemetry</strong> · mob: {selectedUnit.mobility} · vet: <b>{selectedTelemetry.veterancy.toFixed(1)}</b> · obs: {selectedTelemetry.hasObserver ? "YES" : "no"}</div>
+              <div>
+                brain: <b>{selectedTelemetry.lastTacticalAction?.kind ?? "idle"}</b> · leash: <b>{selectedTelemetry.leashRadius}m</b>
+                {selectedTelemetry.intentTag ? ` · intent: "${selectedTelemetry.intentTag}"` : ""}
+              </div>
               {selectedTelemetry.offMapReconstituteAt !== undefined && (
                 <div style={{ color: "#1d4ed8", fontWeight: 700 }}>
                   OFF-MAP RECONSTITUTING: returns in {Math.max(0, selectedTelemetry.offMapReconstituteAt - world.t)}s
