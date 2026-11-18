@@ -8,6 +8,7 @@ import {
   MORALE_SHAKEN_MIDPOINT,
   MORALE_WORRIED_MIDPOINT,
   STATS,
+  UnitBrainFn,
   UnitType,
   World,
   evaluateHePenetration,
@@ -15,6 +16,7 @@ import {
   isCowering,
 } from "../src/sim/world";
 import { asciiMap } from "../src/render/ascii";
+import { dist } from "../src/sim/map";
 
 function verifyPhase1A() {
   assert.equal(TERRAIN_IDS.length, 11, "Expected 11 canonical TerrainId types");
@@ -960,6 +962,67 @@ function verifyPhase4A() {
 
 verifyPhase4A();
 console.log("Phase 4A 11-category NATO vs Pact OOB & Fulda combined-arms checks passed.");
+
+function verifyPhase4B() {
+  // 1. Zero-adaptation-cost pluggable UnitBrainFn via setUnitBrain()
+  const brainMap = new GameMap(2000, 1000, 1, { empty: true });
+  brainMap.paint({ x: 580, y: 500 }, 40, "light_forest");
+  brainMap.paint({ x: 900, y: 500 }, 40, "dense_forest"); // > 140m from (500, 500)
+  const bw = new World(brainMap, 71);
+  const customInf = bw.add({ id: "CustomInf", side: "blue", type: "infantry", pos: { x: 500, y: 500 }, roe: "hold_fire" });
+  let sawContext = false;
+  const mockBrain: UnitBrainFn = (ctx) => {
+    sawContext = ctx.self.id === "CustomInf" && ctx.environment.nearbyCoverCandidates.length > 0;
+    return { kind: "seek_local_cover", coverPos: { x: 800, y: 500 } }; // outside default 140m leash
+  };
+  bw.setUnitBrain("CustomInf", mockBrain);
+  for (let i = 0; i < 40; i++) bw.step();
+  assert.equal(sawContext, true, "UnitBrainFn must receive complete UnitTacticalContext");
+  assert.equal(customInf.lastTacticalAction?.kind, "seek_local_cover");
+  assert.ok(dist(customInf.pos, customInf.anchorPos) <= 140 + 1e-6, "Execution must clamp custom brain movement strictly inside leashRadius");
+
+  // 2. Open-terrain cover auto-snap bounded by leashRadius (ignores far forest outside leash)
+  const snapMap = new GameMap(2000, 1000, 1, { empty: true });
+  snapMap.paint({ x: 580, y: 500 }, 30, "light_forest"); // 80m from anchor (500, 500)
+  snapMap.paint({ x: 900, y: 500 }, 50, "dense_forest"); // 400m from anchor
+  const sw = new World(snapMap, 72);
+  const snapInf = sw.add({ id: "SnapInf", side: "blue", type: "infantry", pos: { x: 500, y: 500 } });
+  const farInf = sw.add({ id: "FarInf", side: "blue", type: "infantry", pos: { x: 200, y: 500 } });
+  sw.command(snapInf, { kind: "hold", leashRadius: 120, intentTag: "Hold treeline" });
+  sw.command(farInf, { kind: "hold", leashRadius: 120, intentTag: "Hold open" });
+  for (let i = 0; i < 75; i++) sw.step();
+  assert.equal(snapMap.terrainIdAt(snapInf.pos), "light_forest", "Halted open-terrain infantry must snap into nearby cover within leashRadius");
+  assert.ok(dist(snapInf.pos, snapInf.anchorPos) <= 120 + 1e-6, "Cover snap must remain within leashRadius of anchor");
+  assert.equal(snapInf.order.intentTag, "Hold treeline", "Tactical snap must preserve order intentTag");
+  assert.equal(dist(farInf.pos, { x: 200, y: 500 }), 0, "Unit must NOT wander beyond leashRadius for distant cover");
+
+  // 3. Unanswerable heavy threat -> pop_smoke_and_retreat (spawns defensive SmokeVolume & backs off within leash)
+  const smkMap = new GameMap(2500, 1000, 1, { empty: true });
+  const smkWorld = new World(smkMap, 73);
+  const lightIfv = smkWorld.add({ id: "LightIFV", side: "blue", type: "recon", pos: { x: 600, y: 500 } });
+  const heavyMbt = smkWorld.add({ id: "HeavyMBT", side: "red", type: "tank", pos: { x: 1400, y: 500 } });
+  smkWorld.command(lightIfv, { kind: "hold", leashRadius: 140 });
+  for (let i = 0; i < 8; i++) smkWorld.step();
+  assert.ok(smkWorld.smokeVolumes.length > 0, "Unanswerable threat fire must trigger defensive smoke deployment");
+  assert.ok(lightIfv.pos.x < 595, "pop_smoke_and_retreat must back away from threat");
+  assert.ok(dist(lightIfv.pos, lightIfv.anchorPos) <= 140 + 1e-6, "Retreat must remain tethered within leashRadius");
+  assert.ok(heavyMbt.state !== "destroyed");
+
+  // 4. incomingArtilleryWarning -> shoot_and_scoot displacement within leashRadius
+  const artMap = new GameMap(3000, 1000, 1, { empty: true });
+  const aw = new World(artMap, 74);
+  const gun = aw.add({ id: "RedSPG", side: "red", type: "artillery", pos: { x: 2600, y: 500 }, roe: "hold_fire" });
+  const targetInf = aw.add({ id: "TargetInf", side: "blue", type: "infantry", pos: { x: 1000, y: 500 } });
+  aw.command(targetInf, { kind: "hold", leashRadius: 130 });
+  assert.equal(aw.command(gun, { kind: "fire_mission", dest: { x: 1000, y: 500 }, ammoType: "HE_Impact" }), "ok");
+  for (let i = 0; i < 6; i++) aw.step();
+  assert.equal(targetInf.lastTacticalAction?.kind, "shoot_and_scoot");
+  assert.ok(dist(targetInf.pos, { x: 1000, y: 500 }) > 3, "incomingArtilleryWarning must trigger shoot_and_scoot displacement");
+  assert.ok(dist(targetInf.pos, targetInf.anchorPos) <= 130 + 1e-6, "Displacement must stay within leashRadius");
+}
+
+verifyPhase4B();
+console.log("Phase 4B zero-adaptation-cost UnitBrainFn, leashRadius cover snap, smoke retreat & artillery scoot checks passed.");
 
 const objective = map.resolve("Geisa")!;
 for (const u of world.alive("blue")) {

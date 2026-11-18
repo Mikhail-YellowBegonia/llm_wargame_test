@@ -485,6 +485,36 @@ export class GameMap {
     return { signatureMult, damageMult, suppressionMult, attackMult };
   }
 
+  /** Sample nearby passable terrain cover positions (hedgerow/forest/tall_grass) within radius. */
+  findNearbyCoverCandidates(pos: Vec, radius: number, traits: ReadonlyArray<UnitTrait>, mobility?: MobilityClass): Vec[] {
+    const step = radius <= 160 ? FINE_CELL : FINE_CELL * 2;
+    const cMin = Math.max(0, Math.floor((pos.x - radius) / step) * (step / FINE_CELL));
+    const cMax = Math.min(this.fineCols - 1, Math.ceil((pos.x + radius) / FINE_CELL));
+    const rMin = Math.max(0, Math.floor((pos.y - radius) / step) * (step / FINE_CELL));
+    const rMax = Math.min(this.fineRows - 1, Math.ceil((pos.y + radius) / FINE_CELL));
+    const inc = step / FINE_CELL;
+    const scored: { p: Vec; score: number }[] = [];
+
+    for (let fr = rMin; fr <= rMax; fr += inc) {
+      for (let fc = cMin; fc <= cMax; fc += inc) {
+        const p = { x: (fc + 0.5) * FINE_CELL, y: (fr + 0.5) * FINE_CELL };
+        const d = dist(pos, p);
+        if (d > radius || d < 5) continue;
+        if (mobility && !this.isPassable(p, mobility)) continue;
+        if (this.buildingAt(p)) continue;
+        const tid = this.terrainIdAt(p);
+        if (tid !== "hedgerow" && tid !== "light_forest" && tid !== "dense_forest" && tid !== "tall_grass") continue;
+        const mods = this.getTerrainModifiers(p, traits);
+        const dmgSave = 1 - (mods.damageMult ?? 1);
+        const sigSave = 1 - (mods.signatureMult ?? 1);
+        if (dmgSave <= 0 && sigSave <= 0.15) continue;
+        scored.push({ p, score: dmgSave * 100 + sigSave * 40 - d * 0.25 });
+      }
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, 6).map((s) => s.p);
+  }
+
   terrainAt(p: Vec): Terrain { return toLegacyTerrain(this.terrainIdAt(p)); }
   heightAt(p: Vec): number { return this.elevationAt(p); }
   inBounds(p: Vec) { return p.x >= 0 && p.y >= 0 && p.x < this.width && p.y < this.depth; }
